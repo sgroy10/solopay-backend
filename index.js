@@ -24,15 +24,9 @@ const PORT = process.env.PORT || 3001;
 
 // Initialize services
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-// Removed Resend - using direct download instead
 
-// Middleware
-app.use(cors({
-  origin: ['https://bolt.new', 'http://localhost:5173', 'http://localhost:3000', '*'],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+// Middleware - Simple CORS allowing all origins
+app.use(cors());
 app.use(express.json());
 
 // Configure multer for file uploads
@@ -56,7 +50,7 @@ const tempDir = path.join(__dirname, 'temp');
 fs.mkdir(tempDir, { recursive: true }).catch(console.error);
 
 // =====================================================
-// STEP 1: Check if PDF is password protected (Firebase URL)
+// STEP 1A: Check if PDF is password protected (Firebase URL)
 // =====================================================
 app.post('/api/check-pdf-url', async (req, res) => {
   console.log('Checking PDF from Firebase URL');
@@ -123,7 +117,9 @@ app.post('/api/check-pdf-url', async (req, res) => {
   }
 });
 
-// Keep the original endpoint for backward compatibility
+// =====================================================
+// STEP 1B: Original Check PDF endpoint (for compatibility)
+// =====================================================
 app.post('/api/check-pdf', upload.single('pdf'), async (req, res) => {
   console.log('Checking PDF - File received:', req.file?.originalname);
   
@@ -613,128 +609,19 @@ function createCreditCardExcel(workbook, analysis) {
   }
 }
 
-function getEmailTemplate(analysis, documentType) {
-  return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        body { 
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-          line-height: 1.6;
-          color: #333;
-        }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { 
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white; 
-          padding: 30px; 
-          border-radius: 10px 10px 0 0;
-          text-align: center;
-        }
-        .content { 
-          background: white; 
-          padding: 30px; 
-          border: 1px solid #e0e0e0;
-          border-top: none;
-          border-radius: 0 0 10px 10px;
-        }
-        .summary { 
-          background: #f8f9fa; 
-          padding: 20px; 
-          border-radius: 8px; 
-          margin: 20px 0; 
-        }
-        .metric { 
-          display: flex; 
-          justify-content: space-between; 
-          padding: 10px 0; 
-          border-bottom: 1px solid #e0e0e0;
-        }
-        .metric:last-child { border-bottom: none; }
-        .alert { 
-          background: #fff3cd; 
-          padding: 15px; 
-          border-left: 4px solid #ffc107;
-          margin: 15px 0;
-        }
-        .footer { 
-          text-align: center; 
-          color: #666; 
-          font-size: 14px; 
-          margin-top: 30px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>📊 Your ${documentType === 'bank' ? 'Bank' : 'Credit Card'} Statement Analysis</h1>
-        </div>
-        <div class="content">
-          <h2>Summary Overview</h2>
-          <div class="summary">
-            ${documentType === 'bank' ? `
-              <div class="metric">
-                <strong>Total Deposits:</strong>
-                <span>₹${analysis.summary?.totalDeposits || 0}</span>
-              </div>
-              <div class="metric">
-                <strong>Total Withdrawals:</strong>
-                <span>₹${analysis.summary?.totalWithdrawals || 0}</span>
-              </div>
-              <div class="metric">
-                <strong>Net Flow:</strong>
-                <span>₹${analysis.summary?.netFlow || 0}</span>
-              </div>
-            ` : `
-              <div class="metric">
-                <strong>Total Spent:</strong>
-                <span>₹${analysis.summary?.totalSpent || 0}</span>
-              </div>
-              <div class="metric">
-                <strong>Outstanding Balance:</strong>
-                <span>₹${analysis.summary?.outstandingBalance || 0}</span>
-              </div>
-              <div class="metric">
-                <strong>Subscriptions Found:</strong>
-                <span>${analysis.subscriptions?.length || 0} services</span>
-              </div>
-            `}
-          </div>
-          
-          ${analysis.alerts && analysis.alerts.length > 0 ? `
-            <h3>⚠️ Important Alerts</h3>
-            ${analysis.alerts.map(alert => `
-              <div class="alert">${alert}</div>
-            `).join('')}
-          ` : ''}
-          
-          <p style="margin-top: 30px;">
-            📎 <strong>Please find the detailed Excel report attached to this email.</strong>
-          </p>
-          
-          <div class="footer">
-            <p>Powered by SoloPay - Your Financial Assistant</p>
-            <p>This is an automated email. Please do not reply.</p>
-          </div>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
-}
-
-// Health check endpoint
+// Health check endpoint with all routes listed
 app.get('/', (req, res) => {
   res.json({ 
     status: 'SoloPay Backend Running',
     endpoints: [
       'POST /api/check-pdf',
+      'POST /api/check-pdf-url',
       'POST /api/unlock-pdf',
       'POST /api/process-pdf',
       'POST /api/generate-report'
-    ]
+    ],
+    version: '2.0',
+    features: ['Firebase URL support', 'Direct Excel download']
   });
 });
 
@@ -773,8 +660,7 @@ app.listen(PORT, () => {
 ║  Password PDFs: ✅                     ║
 ║  Gemini AI: ${process.env.GEMINI_API_KEY ? '✅' : '❌ Missing API Key'}                        ║
 ║  Excel Export: ✅                      ║
+║  Firebase URLs: ✅                     ║
 ╚════════════════════════════════════════╝
   `);
 });
-
-export default app;// Force rebuild
