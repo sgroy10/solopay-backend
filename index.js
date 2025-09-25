@@ -1,0 +1,734 @@
+// index.js - SoloPay Backend for PDF Statement Analyzer
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import { PDFDocument } from 'pdf-lib';
+import pdf from 'pdf-parse-new';
+import fs from 'fs/promises';
+import path from 'path';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { Resend } from 'resend';
+import ExcelJS from 'exceljs';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Initialize Express
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Initialize services
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Middleware
+app.use(cors({
+  origin: '*', // Allow all origins for now
+  credentials: true
+}));
+app.use(express.json());
+
+// Configure multer for file uploads
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed!'), false);
+    }
+  }
+});
+
+// Create temp directory on startup
+const tempDir = path.join(__dirname, 'temp');
+fs.mkdir(tempDir, { recursive: true }).catch(console.error);
+
+// =====================================================
+// STEP 1: Check if PDF is password protected
+// =====================================================
+app.post('/api/check-pdf', upload.single('pdf'), async (req, res) => {
+  console.log('Checking PDF - File received:', req.file?.originalname);
+  
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const pdfBuffer = req.file.buffer;
+    
+    // Try to load the PDF without password
+    try {
+      const pdfDoc = await PDFDocument.load(pdfBuffer);
+      
+      // If successful, PDF is not password protected
+      const sessionId = generateSessionId();
+      await saveTemporaryFile(sessionId, pdfBuffer);
+      
+      res.json({
+        status: 'success',
+        passwordRequired: false,
+        message: 'No password required. Click to continue.',
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        sessionId: sessionId
+      });
+      
+    } catch (error) {
+      if (error.message && error.message.includes('encrypted')) {
+        // PDF is password protected
+        const sessionId = generateSessionId();
+        await saveTemporaryFile(sessionId, pdfBuffer);
+        
+        res.json({
+          status: 'password_required',
+          passwordRequired: true,
+          message: 'This PDF is password protected. Please enter the password.',
+          fileName: req.file.originalname,
+          fileSize: req.file.size,
+          sessionId: sessionId
+        });
+      } else {
+        throw error;
+      }
+    }
+  } catch (error) {
+    console.error('Error checking PDF:', error);
+    res.status(500).json({
+      error: 'Failed to check PDF',
+      details: error.message
+    });
+  }
+});
+
+// =====================================================
+// STEP 2: Unlock password-protected PDF
+// =====================================================
+app.post('/api/unlock-pdf', async (req, res) => {
+  console.log('Unlocking PDF - Session:', req.body.sessionId);
+  
+  try {
+    const { sessionId, password } = req.body;
+
+    if (!sessionId || !password) {
+      return res.status(400).json({ 
+        error: 'Session ID and password are required' 
+      });
+    }
+
+    // Retrieve temporary file
+    const pdfBuffer = await getTemporaryFile(sessionId);
+    
+    if (!pdfBuffer) {
+      return res.status(404).json({ 
+        error: 'Session expired or file not found' 
+      });
+    }
+
+    // Try to unlock with provided password
+    try {
+      const pdfDoc = await PDFDocument.load(pdfBuffer, { password });
+      
+      // Save unlocked version
+      const unlockedPdfBytes = await pdfDoc.save();
+      await saveTemporaryFile(`${sessionId}_unlocked`, Buffer.from(unlockedPdfBytes));
+
+      res.json({
+        status: 'success',
+        message: 'PDF unlocked successfully! Processing...',
+        sessionId: `${sessionId}_unlocked`
+      });
+
+    } catch (error) {
+      if (error.message && error.message.includes('password')) {
+        res.status(401).json({
+          status: 'invalid_password',
+          error: 'Incorrect password. Please try again.'
+        });
+      } else {
+        throw error;
+      }
+    }
+  } catch (error) {
+    console.error('Error unlocking PDF:', error);
+    res.status(500).json({
+      error: 'Failed to unlock PDF',
+      details: error.message
+    });
+  }
+});
+
+// =====================================================
+// STEP 3: Process PDF and Extract Data
+// =====================================================
+app.post('/api/process-pdf', async (req, res) => {
+  console.log('Processing PDF - Session:', req.body.sessionId, 'Type:', req.body.type);
+  
+  try {
+    const { sessionId, type } = req.body; // type: 'bank' or 'credit'
+
+    const pdfBuffer = await getTemporaryFile(sessionId);
+    
+    if (!pdfBuffer) {
+      return res.status(404).json({ 
+        error: 'Session expired or file not found' 
+      });
+    }
+
+    // Extract text from PDF
+    console.log('Extracting text from PDF...');
+    const pdfData = await pdf(pdfBuffer);
+    const extractedText = pdfData.text;
+    console.log('Text extracted, length:', extractedText.length);
+
+    // Clean up temporary file
+    await deleteTemporaryFile(sessionId);
+
+    // Process with Gemini AI
+    console.log('Processing with Gemini AI...');
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+
+    const prompt = type === 'bank' 
+      ? getBankStatementPrompt(extractedText)
+      : getCreditCardPrompt(extractedText);
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const analysisText = response.text();
+
+    // Parse the JSON response from Gemini
+    let analysis;
+    try {
+      // Extract JSON from the response (Gemini might add extra text)
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        analysis = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('No JSON found in response');
+      }
+    } catch (parseError) {
+      console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
+      // Return a basic structure if parsing fails
+      analysis = {
+        summary: { error: 'Analysis completed but formatting failed' },
+        rawResponse: analysisText.substring(0, 1000)
+      };
+    }
+
+    res.json({
+      status: 'success',
+      analysis: analysis,
+      documentType: type,
+      textLength: extractedText.length
+    });
+
+  } catch (error) {
+    console.error('Error processing PDF:', error);
+    res.status(500).json({
+      error: 'Failed to process PDF',
+      details: error.message
+    });
+  }
+});
+
+// =====================================================
+// STEP 4: Generate and Email Excel Report
+// =====================================================
+app.post('/api/generate-report', async (req, res) => {
+  console.log('Generating report for email:', req.body.email);
+  
+  try {
+    const { analysis, email, documentType } = req.body;
+
+    if (!email || !analysis) {
+      return res.status(400).json({
+        error: 'Email and analysis data are required'
+      });
+    }
+
+    // Create Excel workbook
+    const workbook = new ExcelJS.Workbook();
+    
+    if (documentType === 'bank') {
+      createBankStatementExcel(workbook, analysis);
+    } else {
+      createCreditCardExcel(workbook, analysis);
+    }
+
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    // Send email with Resend
+    console.log('Sending email via Resend...');
+    const { data, error } = await resend.emails.send({
+      from: 'SoloPay <onboarding@resend.dev>', // Use resend.dev for testing
+      to: [email],
+      subject: `Your ${documentType === 'bank' ? 'Bank' : 'Credit Card'} Statement Analysis`,
+      html: getEmailTemplate(analysis, documentType),
+      attachments: [
+        {
+          filename: `statement_analysis_${Date.now()}.xlsx`,
+          content: buffer.toString('base64')
+        }
+      ]
+    });
+
+    if (error) {
+      console.error('Resend error:', error);
+      throw error;
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Report sent successfully to your email!',
+      emailId: data?.id
+    });
+
+  } catch (error) {
+    console.error('Error generating report:', error);
+    res.status(500).json({
+      error: 'Failed to generate report',
+      details: error.message
+    });
+  }
+});
+
+// =====================================================
+// Settings endpoint to save email
+// =====================================================
+app.post('/api/settings', async (req, res) => {
+  const { email } = req.body;
+  // In production, save this to database
+  console.log('Email saved:', email);
+  res.json({ status: 'success', message: 'Settings saved' });
+});
+
+// =====================================================
+// Helper Functions
+// =====================================================
+
+function generateSessionId() {
+  return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+async function saveTemporaryFile(sessionId, buffer) {
+  const tempDir = path.join(__dirname, 'temp');
+  await fs.mkdir(tempDir, { recursive: true });
+  const filePath = path.join(tempDir, `${sessionId}.pdf`);
+  await fs.writeFile(filePath, buffer);
+  console.log('File saved temporarily:', sessionId);
+}
+
+async function getTemporaryFile(sessionId) {
+  try {
+    const filePath = path.join(__dirname, 'temp', `${sessionId}.pdf`);
+    return await fs.readFile(filePath);
+  } catch (error) {
+    console.error('File not found:', sessionId);
+    return null;
+  }
+}
+
+async function deleteTemporaryFile(sessionId) {
+  try {
+    const filePath = path.join(__dirname, 'temp', `${sessionId}.pdf`);
+    await fs.unlink(filePath);
+    console.log('Temp file deleted:', sessionId);
+  } catch (error) {
+    console.error('Error deleting temp file:', error);
+  }
+}
+
+function getBankStatementPrompt(text) {
+  return `
+    You are a financial analyst. Analyze this bank statement and extract ALL information.
+    
+    IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
+    
+    Extract and analyze:
+    1. All transactions with date, description, debit/credit amounts, and balance
+    2. Categorize each transaction (UPI, NEFT, ATM, Credit Card, etc.)
+    3. Calculate total money in and out
+    4. Find patterns in spending
+    5. Identify all recurring payments
+    
+    Return this exact JSON structure:
+    {
+      "accountInfo": {
+        "bankName": "string",
+        "accountNumber": "string",
+        "period": "string",
+        "openingBalance": number,
+        "closingBalance": number
+      },
+      "summary": {
+        "totalDeposits": number,
+        "totalWithdrawals": number,
+        "netFlow": number,
+        "transactionCount": number,
+        "avgDailySpending": number
+      },
+      "categories": {
+        "upi": { "total": number, "count": number, "percentage": number },
+        "neft": { "total": number, "count": number, "percentage": number },
+        "atm": { "total": number, "count": number, "percentage": number },
+        "creditCard": { "total": number, "count": number, "percentage": number },
+        "others": { "total": number, "count": number, "percentage": number }
+      },
+      "monthlyPatterns": {
+        "highestSpendingMonth": "string",
+        "lowestSpendingMonth": "string",
+        "averageMonthlySpending": number
+      },
+      "recurringPayments": [
+        { "description": "string", "amount": number, "frequency": "string" }
+      ],
+      "topTransactions": [
+        { "date": "string", "description": "string", "amount": number, "type": "string" }
+      ],
+      "alerts": ["string"],
+      "transactions": [
+        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number, "category": "string" }
+      ]
+    }
+    
+    Bank Statement Text:
+    ${text.substring(0, 50000)} // Limit text to avoid token limits
+  `;
+}
+
+function getCreditCardPrompt(text) {
+  return `
+    You are a financial analyst. Analyze this credit card statement and extract ALL information.
+    
+    IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
+    
+    Extract and analyze:
+    1. All transactions with date, merchant, and amount
+    2. Identify ALL subscriptions (Netflix, Spotify, ChatGPT, etc.)
+    3. Categorize spending by type
+    4. Find expensive transactions
+    5. Calculate total spending
+    
+    Return this exact JSON structure:
+    {
+      "cardInfo": {
+        "bankName": "string",
+        "cardNumber": "string",
+        "statementPeriod": "string",
+        "creditLimit": number,
+        "availableCredit": number
+      },
+      "summary": {
+        "totalSpent": number,
+        "paymentMade": number,
+        "minimumDue": number,
+        "dueDate": "string",
+        "outstandingBalance": number
+      },
+      "subscriptions": [
+        { 
+          "merchant": "string", 
+          "amount": number, 
+          "category": "string",
+          "frequency": "monthly/annual"
+        }
+      ],
+      "categories": {
+        "dining": { "total": number, "count": number, "percentage": number },
+        "shopping": { "total": number, "count": number, "percentage": number },
+        "travel": { "total": number, "count": number, "percentage": number },
+        "entertainment": { "total": number, "count": number, "percentage": number },
+        "utilities": { "total": number, "count": number, "percentage": number },
+        "others": { "total": number, "count": number, "percentage": number }
+      },
+      "expensiveTransactions": [
+        { "date": "string", "merchant": "string", "amount": number }
+      ],
+      "alerts": ["string"],
+      "transactions": [
+        { "date": "string", "merchant": "string", "amount": number, "category": "string" }
+      ]
+    }
+    
+    Credit Card Statement Text:
+    ${text.substring(0, 50000)} // Limit text to avoid token limits
+  `;
+}
+
+function createBankStatementExcel(workbook, analysis) {
+  // Worksheet 1: Raw Data
+  const rawSheet = workbook.addWorksheet('All Transactions');
+  rawSheet.columns = [
+    { header: 'Date', key: 'date', width: 15 },
+    { header: 'Description', key: 'description', width: 40 },
+    { header: 'Debit', key: 'debit', width: 15 },
+    { header: 'Credit', key: 'credit', width: 15 },
+    { header: 'Balance', key: 'balance', width: 15 },
+    { header: 'Category', key: 'category', width: 15 }
+  ];
+
+  // Add transactions
+  if (analysis.transactions && Array.isArray(analysis.transactions)) {
+    analysis.transactions.forEach(t => {
+      rawSheet.addRow({
+        date: t.date || '',
+        description: t.description || '',
+        debit: t.debit || 0,
+        credit: t.credit || 0,
+        balance: t.balance || 0,
+        category: t.category || ''
+      });
+    });
+  }
+
+  // Worksheet 2: Summary
+  const summarySheet = workbook.addWorksheet('Summary');
+  summarySheet.columns = [
+    { header: 'Metric', key: 'metric', width: 30 },
+    { header: 'Value', key: 'value', width: 20 }
+  ];
+
+  // Add summary data
+  if (analysis.summary) {
+    summarySheet.addRow({ metric: 'Total Deposits', value: analysis.summary.totalDeposits || 0 });
+    summarySheet.addRow({ metric: 'Total Withdrawals', value: analysis.summary.totalWithdrawals || 0 });
+    summarySheet.addRow({ metric: 'Net Flow', value: analysis.summary.netFlow || 0 });
+    summarySheet.addRow({ metric: 'Transaction Count', value: analysis.summary.transactionCount || 0 });
+    summarySheet.addRow({ metric: 'Average Daily Spending', value: analysis.summary.avgDailySpending || 0 });
+  }
+
+  // Add category breakdown
+  summarySheet.addRow({ metric: '', value: '' }); // Empty row
+  summarySheet.addRow({ metric: 'Category Breakdown', value: '' });
+  
+  if (analysis.categories) {
+    Object.entries(analysis.categories).forEach(([cat, data]) => {
+      summarySheet.addRow({ 
+        metric: cat.toUpperCase(), 
+        value: `₹${data.total || 0} (${data.count || 0} transactions)` 
+      });
+    });
+  }
+}
+
+function createCreditCardExcel(workbook, analysis) {
+  // Worksheet 1: All Transactions
+  const transSheet = workbook.addWorksheet('Transactions');
+  transSheet.columns = [
+    { header: 'Date', key: 'date', width: 15 },
+    { header: 'Merchant', key: 'merchant', width: 35 },
+    { header: 'Amount', key: 'amount', width: 15 },
+    { header: 'Category', key: 'category', width: 20 }
+  ];
+
+  if (analysis.transactions && Array.isArray(analysis.transactions)) {
+    analysis.transactions.forEach(t => {
+      transSheet.addRow(t);
+    });
+  }
+
+  // Worksheet 2: Subscriptions
+  const subSheet = workbook.addWorksheet('Subscriptions');
+  subSheet.columns = [
+    { header: 'Service', key: 'merchant', width: 30 },
+    { header: 'Amount', key: 'amount', width: 15 },
+    { header: 'Frequency', key: 'frequency', width: 15 },
+    { header: 'Category', key: 'category', width: 20 }
+  ];
+
+  if (analysis.subscriptions && Array.isArray(analysis.subscriptions)) {
+    analysis.subscriptions.forEach(s => {
+      subSheet.addRow(s);
+    });
+  }
+
+  // Worksheet 3: Summary
+  const summarySheet = workbook.addWorksheet('Summary');
+  summarySheet.columns = [
+    { header: 'Metric', key: 'metric', width: 30 },
+    { header: 'Value', key: 'value', width: 20 }
+  ];
+
+  if (analysis.summary) {
+    summarySheet.addRow({ metric: 'Total Spent', value: analysis.summary.totalSpent || 0 });
+    summarySheet.addRow({ metric: 'Payment Made', value: analysis.summary.paymentMade || 0 });
+    summarySheet.addRow({ metric: 'Outstanding Balance', value: analysis.summary.outstandingBalance || 0 });
+  }
+}
+
+function getEmailTemplate(analysis, documentType) {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { 
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+          line-height: 1.6;
+          color: #333;
+        }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { 
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white; 
+          padding: 30px; 
+          border-radius: 10px 10px 0 0;
+          text-align: center;
+        }
+        .content { 
+          background: white; 
+          padding: 30px; 
+          border: 1px solid #e0e0e0;
+          border-top: none;
+          border-radius: 0 0 10px 10px;
+        }
+        .summary { 
+          background: #f8f9fa; 
+          padding: 20px; 
+          border-radius: 8px; 
+          margin: 20px 0; 
+        }
+        .metric { 
+          display: flex; 
+          justify-content: space-between; 
+          padding: 10px 0; 
+          border-bottom: 1px solid #e0e0e0;
+        }
+        .metric:last-child { border-bottom: none; }
+        .alert { 
+          background: #fff3cd; 
+          padding: 15px; 
+          border-left: 4px solid #ffc107;
+          margin: 15px 0;
+        }
+        .footer { 
+          text-align: center; 
+          color: #666; 
+          font-size: 14px; 
+          margin-top: 30px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>📊 Your ${documentType === 'bank' ? 'Bank' : 'Credit Card'} Statement Analysis</h1>
+        </div>
+        <div class="content">
+          <h2>Summary Overview</h2>
+          <div class="summary">
+            ${documentType === 'bank' ? `
+              <div class="metric">
+                <strong>Total Deposits:</strong>
+                <span>₹${analysis.summary?.totalDeposits || 0}</span>
+              </div>
+              <div class="metric">
+                <strong>Total Withdrawals:</strong>
+                <span>₹${analysis.summary?.totalWithdrawals || 0}</span>
+              </div>
+              <div class="metric">
+                <strong>Net Flow:</strong>
+                <span>₹${analysis.summary?.netFlow || 0}</span>
+              </div>
+            ` : `
+              <div class="metric">
+                <strong>Total Spent:</strong>
+                <span>₹${analysis.summary?.totalSpent || 0}</span>
+              </div>
+              <div class="metric">
+                <strong>Outstanding Balance:</strong>
+                <span>₹${analysis.summary?.outstandingBalance || 0}</span>
+              </div>
+              <div class="metric">
+                <strong>Subscriptions Found:</strong>
+                <span>${analysis.subscriptions?.length || 0} services</span>
+              </div>
+            `}
+          </div>
+          
+          ${analysis.alerts && analysis.alerts.length > 0 ? `
+            <h3>⚠️ Important Alerts</h3>
+            ${analysis.alerts.map(alert => `
+              <div class="alert">${alert}</div>
+            `).join('')}
+          ` : ''}
+          
+          <p style="margin-top: 30px;">
+            📎 <strong>Please find the detailed Excel report attached to this email.</strong>
+          </p>
+          
+          <div class="footer">
+            <p>Powered by SoloPay - Your Financial Assistant</p>
+            <p>This is an automated email. Please do not reply.</p>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'SoloPay Backend Running',
+    endpoints: [
+      'POST /api/check-pdf',
+      'POST /api/unlock-pdf',
+      'POST /api/process-pdf',
+      'POST /api/generate-report'
+    ]
+  });
+});
+
+// Clean up temp files periodically (every hour)
+setInterval(async () => {
+  try {
+    const tempDir = path.join(__dirname, 'temp');
+    const files = await fs.readdir(tempDir).catch(() => []);
+    const now = Date.now();
+    
+    for (const file of files) {
+      const filePath = path.join(tempDir, file);
+      const stats = await fs.stat(filePath);
+      const age = now - stats.mtimeMs;
+      
+      // Delete files older than 1 hour
+      if (age > 3600000) {
+        await fs.unlink(filePath);
+        console.log(`Cleaned up old temp file: ${file}`);
+      }
+    }
+  } catch (error) {
+    console.error('Cleanup error:', error);
+  }
+}, 3600000); // Run every hour
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`
+╔════════════════════════════════════════╗
+║     🚀 SoloPay Backend Started!        ║
+╠════════════════════════════════════════╣
+║  Port: ${PORT}                            ║
+║  Status: Ready                         ║
+║  PDF Support: ✅                       ║
+║  Password PDFs: ✅                     ║
+║  Gemini AI: ${process.env.GEMINI_API_KEY ? '✅' : '❌ Missing API Key'}                        ║
+║  Email Service: ${process.env.RESEND_API_KEY ? '✅' : '❌ Missing API Key'}                    ║
+╚════════════════════════════════════════╝
+  `);
+});
+
+export default app;
