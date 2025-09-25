@@ -7,7 +7,6 @@ import pdf from 'pdf-parse-new';
 import fs from 'fs/promises';
 import path from 'path';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Resend } from 'resend';
 import ExcelJS from 'exceljs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -25,7 +24,7 @@ const PORT = process.env.PORT || 3001;
 
 // Initialize services
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Removed Resend - using direct download instead
 
 // Middleware
 app.use(cors({
@@ -244,17 +243,17 @@ app.post('/api/process-pdf', async (req, res) => {
 });
 
 // =====================================================
-// STEP 4: Generate and Email Excel Report
+// STEP 4: Generate and Download Excel Report (No Email)
 // =====================================================
 app.post('/api/generate-report', async (req, res) => {
-  console.log('Generating report for email:', req.body.email);
+  console.log('Generating Excel report for download');
   
   try {
-    const { analysis, email, documentType } = req.body;
+    const { analysis, documentType } = req.body;
 
-    if (!email || !analysis) {
+    if (!analysis) {
       return res.status(400).json({
-        error: 'Email and analysis data are required'
+        error: 'Analysis data is required'
       });
     }
 
@@ -270,31 +269,10 @@ app.post('/api/generate-report', async (req, res) => {
     // Generate buffer
     const buffer = await workbook.xlsx.writeBuffer();
 
-    // Send email with Resend
-    console.log('Sending email via Resend...');
-    const { data, error } = await resend.emails.send({
-      from: 'SoloPay <onboarding@resend.dev>', // Use resend.dev for testing
-      to: [email],
-      subject: `Your ${documentType === 'bank' ? 'Bank' : 'Credit Card'} Statement Analysis`,
-      html: getEmailTemplate(analysis, documentType),
-      attachments: [
-        {
-          filename: `statement_analysis_${Date.now()}.xlsx`,
-          content: buffer.toString('base64')
-        }
-      ]
-    });
-
-    if (error) {
-      console.error('Resend error:', error);
-      throw error;
-    }
-
-    res.json({
-      status: 'success',
-      message: 'Report sent successfully to your email!',
-      emailId: data?.id
-    });
+    // Send Excel file as download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=statement_analysis_${Date.now()}.xlsx`);
+    res.send(buffer);
 
   } catch (error) {
     console.error('Error generating report:', error);
@@ -728,7 +706,7 @@ app.listen(PORT, () => {
 ║  PDF Support: ✅                       ║
 ║  Password PDFs: ✅                     ║
 ║  Gemini AI: ${process.env.GEMINI_API_KEY ? '✅' : '❌ Missing API Key'}                        ║
-║  Email Service: ${process.env.RESEND_API_KEY ? '✅' : '❌ Missing API Key'}                    ║
+║  Excel Export: ✅                      ║
 ╚════════════════════════════════════════╝
   `);
 });
