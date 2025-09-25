@@ -56,8 +56,74 @@ const tempDir = path.join(__dirname, 'temp');
 fs.mkdir(tempDir, { recursive: true }).catch(console.error);
 
 // =====================================================
-// STEP 1: Check if PDF is password protected
+// STEP 1: Check if PDF is password protected (Firebase URL)
 // =====================================================
+app.post('/api/check-pdf-url', async (req, res) => {
+  console.log('Checking PDF from Firebase URL');
+  
+  try {
+    const { pdfUrl, fileName, fileSize } = req.body;
+    
+    if (!pdfUrl) {
+      return res.status(400).json({ error: 'No PDF URL provided' });
+    }
+
+    // Download PDF from Firebase URL
+    console.log('Downloading from Firebase:', pdfUrl);
+    const response = await fetch(pdfUrl);
+    
+    if (!response.ok) {
+      throw new Error('Failed to download PDF from Firebase');
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const pdfBuffer = Buffer.from(arrayBuffer);
+    
+    // Try to load the PDF without password
+    try {
+      const pdfDoc = await PDFDocument.load(pdfBuffer);
+      
+      // If successful, PDF is not password protected
+      const sessionId = generateSessionId();
+      await saveTemporaryFile(sessionId, pdfBuffer);
+      
+      res.json({
+        status: 'success',
+        passwordRequired: false,
+        message: 'No password required. Click to continue.',
+        fileName: fileName,
+        fileSize: fileSize,
+        sessionId: sessionId
+      });
+      
+    } catch (error) {
+      if (error.message && error.message.includes('encrypted')) {
+        // PDF is password protected
+        const sessionId = generateSessionId();
+        await saveTemporaryFile(sessionId, pdfBuffer);
+        
+        res.json({
+          status: 'password_required',
+          passwordRequired: true,
+          message: 'This PDF is password protected. Please enter the password.',
+          fileName: fileName,
+          fileSize: fileSize,
+          sessionId: sessionId
+        });
+      } else {
+        throw error;
+      }
+    }
+  } catch (error) {
+    console.error('Error checking PDF from URL:', error);
+    res.status(500).json({
+      error: 'Failed to check PDF',
+      details: error.message
+    });
+  }
+});
+
+// Keep the original endpoint for backward compatibility
 app.post('/api/check-pdf', upload.single('pdf'), async (req, res) => {
   console.log('Checking PDF - File received:', req.file?.originalname);
   
