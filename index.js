@@ -464,23 +464,16 @@ async function deleteTemporaryFile(sessionId) {
 
 function getBankStatementPrompt(text) {
   return `
-    You are a financial analyst. Analyze this bank statement and extract ALL information.
+    You are a friendly financial advisor analyzing a bank statement. Be specific and human in your analysis.
     
     IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
     
-    Extract and analyze:
-    1. All transactions with date, description, debit/credit amounts, and balance
-    2. Categorize each transaction (UPI, NEFT, ATM, Credit Card, etc.)
-    3. Calculate total money in and out
-    4. Find patterns in spending
-    5. Identify all recurring payments
-    
-    Return this exact JSON structure:
+    Extract and analyze everything, then return this exact JSON structure:
     {
       "accountInfo": {
         "bankName": "string",
-        "accountNumber": "string",
-        "period": "string",
+        "accountNumber": "string (masked)",
+        "period": "string (e.g., '1 Sept 2024 to 30 Sept 2024')",
         "openingBalance": number,
         "closingBalance": number
       },
@@ -491,32 +484,96 @@ function getBankStatementPrompt(text) {
         "transactionCount": number,
         "avgDailySpending": number
       },
+      "moneyIn": {
+        "total": number,
+        "sources": [
+          {
+            "source": "string (e.g., 'Salary from ABC Company')",
+            "amount": number,
+            "date": "string",
+            "count": number
+          }
+        ]
+      },
+      "moneyOut": {
+        "total": number,
+        "breakdown": [
+          {
+            "category": "string (e.g., 'Credit Card Payment')",
+            "merchant": "string",
+            "amount": number,
+            "percentage": number,
+            "insight": "string (e.g., 'Higher than last month')"
+          }
+        ]
+      },
       "categories": {
-        "upi": { "total": number, "count": number, "percentage": number },
-        "neft": { "total": number, "count": number, "percentage": number },
-        "atm": { "total": number, "count": number, "percentage": number },
+        "upi": { "total": number, "count": number, "percentage": number, "dailyAvg": number },
         "creditCard": { "total": number, "count": number, "percentage": number },
+        "emi": { "total": number, "count": number, "percentage": number },
+        "bills": { "total": number, "count": number, "percentage": number },
+        "atm": { "total": number, "count": number, "percentage": number },
+        "transfers": { "total": number, "count": number, "percentage": number },
         "others": { "total": number, "count": number, "percentage": number }
       },
-      "monthlyPatterns": {
-        "highestSpendingMonth": "string",
-        "lowestSpendingMonth": "string",
-        "averageMonthlySpending": number
-      },
+      "subscriptions": [
+        { 
+          "name": "string", 
+          "amount": number, 
+          "date": "string",
+          "frequency": "monthly/annual"
+        }
+      ],
       "recurringPayments": [
-        { "description": "string", "amount": number, "frequency": "string" }
+        { "description": "string", "amount": number, "frequency": "string", "lastDate": "string" }
       ],
-      "topTransactions": [
-        { "date": "string", "description": "string", "amount": number, "type": "string" }
+      "redFlags": [
+        {
+          "type": "string (e.g., 'Late Payment Fee')",
+          "description": "string",
+          "amount": number,
+          "suggestion": "string"
+        }
       ],
-      "alerts": ["string"],
+      "greenFlags": [
+        {
+          "type": "string",
+          "description": "string"
+        }
+      ],
+      "unusualTransactions": [
+        { "date": "string", "description": "string", "amount": number, "reason": "string (why unusual)" }
+      ],
+      "humanAdvice": {
+        "summary": "string (2-3 sentences conversational summary)",
+        "whereDidMoneyGo": "string (friendly explanation)",
+        "concerns": ["string"],
+        "recommendations": ["string"],
+        "savingsPotential": number,
+        "savingsAdvice": "string"
+      },
       "transactions": [
-        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number, "category": "string" }
-      ]
+        { 
+          "date": "string", 
+          "description": "string", 
+          "debit": number, 
+          "credit": number, 
+          "balance": number, 
+          "category": "string",
+          "merchant": "string (extracted merchant name)",
+          "isRecurring": boolean
+        }
+      ],
+      "verification": {
+        "extractedCount": number,
+        "totalDebitsExtracted": number,
+        "totalCreditsExtracted": number,
+        "confidence": "high/medium/low"
+      }
     }
     
     Bank Statement Text:
-    ${text.substring(0, 50000)} // Limit text to avoid token limits
+    ${text.substring(0, 50000)}
   `;
 }
 
@@ -580,56 +637,166 @@ function getCreditCardPrompt(text) {
 }
 
 function createBankStatementExcel(workbook, analysis) {
-  // Worksheet 1: Raw Data
+  // Worksheet 1: Verification & Trust
+  const verifySheet = workbook.addWorksheet('Verification');
+  verifySheet.columns = [
+    { header: 'Check Item', key: 'item', width: 40 },
+    { header: 'Value', key: 'value', width: 20 },
+    { header: 'Status', key: 'status', width: 15 }
+  ];
+  
+  if (analysis.accountInfo) {
+    verifySheet.addRow({ item: 'Bank Name', value: analysis.accountInfo.bankName, status: '✓' });
+    verifySheet.addRow({ item: 'Statement Period', value: analysis.accountInfo.period, status: '✓' });
+    verifySheet.addRow({ item: 'Opening Balance', value: analysis.accountInfo.openingBalance, status: '✓' });
+    verifySheet.addRow({ item: 'Closing Balance', value: analysis.accountInfo.closingBalance, status: '✓' });
+  }
+  
+  if (analysis.verification) {
+    verifySheet.addRow({ item: 'Transactions Extracted', value: analysis.verification.extractedCount, status: '✓' });
+    verifySheet.addRow({ item: 'Total Credits', value: analysis.verification.totalCreditsExtracted, status: '✓' });
+    verifySheet.addRow({ item: 'Total Debits', value: analysis.verification.totalDebitsExtracted, status: '✓' });
+    verifySheet.addRow({ item: 'Extraction Confidence', value: analysis.verification.confidence, status: '✓' });
+  }
+
+  // Worksheet 2: Cash Flow Split View
+  const cashFlowSheet = workbook.addWorksheet('Cash Flow');
+  
+  // Create two sections side by side
+  cashFlowSheet.columns = [
+    { header: 'Credit Date', key: 'creditDate', width: 12 },
+    { header: 'Money Received From', key: 'creditDesc', width: 35 },
+    { header: 'Amount In', key: 'creditAmount', width: 15 },
+    { header: '', key: 'spacer', width: 5 },
+    { header: 'Debit Date', key: 'debitDate', width: 12 },
+    { header: 'Money Paid To', key: 'debitDesc', width: 35 },
+    { header: 'Amount Out', key: 'debitAmount', width: 15 }
+  ];
+  
+  // Add transactions
+  if (analysis.transactions && Array.isArray(analysis.transactions)) {
+    const credits = analysis.transactions.filter(t => t.credit > 0);
+    const debits = analysis.transactions.filter(t => t.debit > 0);
+    const maxRows = Math.max(credits.length, debits.length);
+    
+    for (let i = 0; i < maxRows; i++) {
+      const row = {};
+      if (i < credits.length) {
+        row.creditDate = credits[i].date;
+        row.creditDesc = credits[i].description;
+        row.creditAmount = credits[i].credit;
+      }
+      if (i < debits.length) {
+        row.debitDate = debits[i].date;
+        row.debitDesc = debits[i].description;
+        row.debitAmount = debits[i].debit;
+      }
+      cashFlowSheet.addRow(row);
+    }
+  }
+
+  // Worksheet 3: All Transactions
   const rawSheet = workbook.addWorksheet('All Transactions');
   rawSheet.columns = [
     { header: 'Date', key: 'date', width: 15 },
     { header: 'Description', key: 'description', width: 40 },
+    { header: 'Merchant/Person', key: 'merchant', width: 25 },
     { header: 'Debit', key: 'debit', width: 15 },
     { header: 'Credit', key: 'credit', width: 15 },
     { header: 'Balance', key: 'balance', width: 15 },
-    { header: 'Category', key: 'category', width: 15 }
+    { header: 'Category', key: 'category', width: 15 },
+    { header: 'Recurring', key: 'recurring', width: 10 }
   ];
 
-  // Add transactions
   if (analysis.transactions && Array.isArray(analysis.transactions)) {
     analysis.transactions.forEach(t => {
       rawSheet.addRow({
         date: t.date || '',
         description: t.description || '',
+        merchant: t.merchant || '',
         debit: t.debit || 0,
         credit: t.credit || 0,
         balance: t.balance || 0,
-        category: t.category || ''
+        category: t.category || '',
+        recurring: t.isRecurring ? 'Yes' : 'No'
       });
     });
   }
 
-  // Worksheet 2: Summary
+  // Worksheet 4: Smart Analysis
+  const analysisSheet = workbook.addWorksheet('Smart Analysis');
+  analysisSheet.columns = [
+    { header: 'Analysis Type', key: 'type', width: 30 },
+    { header: 'Details', key: 'details', width: 60 },
+    { header: 'Amount/Value', key: 'value', width: 20 }
+  ];
+
+  // Add human advice
+  if (analysis.humanAdvice) {
+    analysisSheet.addRow({ type: 'Summary', details: analysis.humanAdvice.summary });
+    analysisSheet.addRow({ type: 'Where Did Money Go?', details: analysis.humanAdvice.whereDidMoneyGo });
+    analysisSheet.addRow({ type: 'Savings Potential', details: analysis.humanAdvice.savingsAdvice, value: analysis.humanAdvice.savingsPotential });
+  }
+
+  // Add red flags
+  if (analysis.redFlags && analysis.redFlags.length > 0) {
+    analysisSheet.addRow({ type: '', details: '' }); // Empty row
+    analysisSheet.addRow({ type: '🚨 RED FLAGS', details: '', value: '' });
+    analysis.redFlags.forEach(flag => {
+      analysisSheet.addRow({ 
+        type: flag.type, 
+        details: `${flag.description} - Suggestion: ${flag.suggestion}`, 
+        value: flag.amount 
+      });
+    });
+  }
+
+  // Add green flags
+  if (analysis.greenFlags && analysis.greenFlags.length > 0) {
+    analysisSheet.addRow({ type: '', details: '' }); // Empty row
+    analysisSheet.addRow({ type: '✅ GREEN FLAGS', details: '', value: '' });
+    analysis.greenFlags.forEach(flag => {
+      analysisSheet.addRow({ type: flag.type, details: flag.description });
+    });
+  }
+
+  // Worksheet 5: Summary Dashboard
   const summarySheet = workbook.addWorksheet('Summary');
   summarySheet.columns = [
     { header: 'Metric', key: 'metric', width: 30 },
-    { header: 'Value', key: 'value', width: 20 }
+    { header: 'Value', key: 'value', width: 20 },
+    { header: 'Insights', key: 'insight', width: 50 }
   ];
 
-  // Add summary data
   if (analysis.summary) {
-    summarySheet.addRow({ metric: 'Total Deposits', value: analysis.summary.totalDeposits || 0 });
-    summarySheet.addRow({ metric: 'Total Withdrawals', value: analysis.summary.totalWithdrawals || 0 });
-    summarySheet.addRow({ metric: 'Net Flow', value: analysis.summary.netFlow || 0 });
-    summarySheet.addRow({ metric: 'Transaction Count', value: analysis.summary.transactionCount || 0 });
-    summarySheet.addRow({ metric: 'Average Daily Spending', value: analysis.summary.avgDailySpending || 0 });
+    summarySheet.addRow({ metric: 'Total Money Received', value: `₹${analysis.summary.totalDeposits || 0}` });
+    summarySheet.addRow({ metric: 'Total Money Spent', value: `₹${analysis.summary.totalWithdrawals || 0}` });
+    summarySheet.addRow({ metric: 'Net Position', value: `₹${analysis.summary.netFlow || 0}`, insight: analysis.summary.netFlow > 0 ? 'You saved money!' : 'You spent more than earned' });
+    summarySheet.addRow({ metric: 'Daily Average Spending', value: `₹${analysis.summary.avgDailySpending || 0}` });
   }
 
-  // Add category breakdown
-  summarySheet.addRow({ metric: '', value: '' }); // Empty row
-  summarySheet.addRow({ metric: 'Category Breakdown', value: '' });
-  
-  if (analysis.categories) {
-    Object.entries(analysis.categories).forEach(([cat, data]) => {
+  // Add money sources
+  if (analysis.moneyIn && analysis.moneyIn.sources) {
+    summarySheet.addRow({ metric: '', value: '' }); // Empty row
+    summarySheet.addRow({ metric: 'WHERE MONEY CAME FROM', value: '', insight: '' });
+    analysis.moneyIn.sources.forEach(source => {
       summarySheet.addRow({ 
-        metric: cat.toUpperCase(), 
-        value: `₹${data.total || 0} (${data.count || 0} transactions)` 
+        metric: source.source, 
+        value: `₹${source.amount}`, 
+        insight: `on ${source.date}` 
+      });
+    });
+  }
+
+  // Add spending breakdown
+  if (analysis.moneyOut && analysis.moneyOut.breakdown) {
+    summarySheet.addRow({ metric: '', value: '' }); // Empty row
+    summarySheet.addRow({ metric: 'WHERE MONEY WENT', value: '', insight: '' });
+    analysis.moneyOut.breakdown.forEach(item => {
+      summarySheet.addRow({ 
+        metric: item.category, 
+        value: `₹${item.amount} (${item.percentage}%)`, 
+        insight: item.insight 
       });
     });
   }
