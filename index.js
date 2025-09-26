@@ -464,23 +464,16 @@ async function deleteTemporaryFile(sessionId) {
 
 function getBankStatementPrompt(text) {
   return `
-    You are a financial analyst. Analyze this bank statement and extract detailed transaction information.
+    You are a financial analyst. Analyze this bank statement and extract ALL information.
     
     IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
     
-    Extract and analyze with these specific requirements:
-    
-    1. For MONEY IN (Credits/Deposits):
-       - Extract the sender's name/source from the description
-       - Identify salary, transfers, refunds, interest, etc.
-       - Group similar deposits together
-    
-    2. For MONEY OUT (Debits/Withdrawals):
-       - Extract recipient names from UPI/NEFT descriptions
-       - Identify subscription services by name
-       - Group similar expenses
-    
-    3. Extract EXACT transaction details from the statement
+    Extract and analyze:
+    1. All transactions with date, description, debit/credit amounts, and balance
+    2. Categorize each transaction (UPI, NEFT, ATM, Credit Card, etc.)
+    3. Calculate total money in and out
+    4. Find patterns in spending
+    5. Identify all recurring payments
     
     Return this exact JSON structure:
     {
@@ -497,30 +490,6 @@ function getBankStatementPrompt(text) {
         "netFlow": number,
         "transactionCount": number,
         "avgDailySpending": number
-      },
-      "moneyIn": {
-        "total": number,
-        "sources": [
-          {
-            "source": "string (e.g., Salary from XYZ Corp, Transfer from Mom)",
-            "amount": number,
-            "date": "string",
-            "count": number,
-            "type": "salary/transfer/refund/interest/other"
-          }
-        ]
-      },
-      "moneyOut": {
-        "total": number,
-        "breakdown": [
-          {
-            "category": "string (e.g., Credit Card Payment, UPI to merchants)",
-            "amount": number,
-            "count": number,
-            "percentage": number,
-            "details": "string (key recipients or purposes)"
-          }
-        ]
       },
       "categories": {
         "upi": { "total": number, "count": number, "percentage": number },
