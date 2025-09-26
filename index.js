@@ -27,7 +27,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Middleware - Simple CORS allowing all origins
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Increase limit for text data
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -48,6 +48,77 @@ const upload = multer({
 // Create temp directory on startup
 const tempDir = path.join(__dirname, 'temp');
 fs.mkdir(tempDir, { recursive: true }).catch(console.error);
+
+// =====================================================
+// NEW ENDPOINT: Analyze extracted text (no PDF processing needed)
+// =====================================================
+app.post('/api/analyze-text', async (req, res) => {
+  console.log('Analyzing text from client - Type:', req.body.documentType);
+  
+  try {
+    const { text, documentType } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ 
+        error: 'No text provided for analysis' 
+      });
+    }
+
+    // Process with Gemini AI directly (no PDF extraction needed)
+    console.log('Processing with Gemini AI...');
+    console.log('Text length received:', text.length);
+    
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+
+    const prompt = documentType === 'bank' 
+      ? getBankStatementPrompt(text)
+      : getCreditCardPrompt(text);
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const analysisText = response.text();
+
+    // Parse the JSON response from Gemini
+    let analysis;
+    try {
+      // Extract JSON from the response (Gemini might add extra text)
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        analysis = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('No JSON found in response');
+      }
+    } catch (parseError) {
+      console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
+      // Return a basic structure if parsing fails
+      analysis = {
+        summary: {
+          totalDeposits: 0,
+          totalWithdrawals: 0,
+          netFlow: 0,
+          error: 'Analysis completed but formatting failed'
+        },
+        categories: {},
+        alerts: ['Analysis completed but data formatting failed'],
+        rawResponse: analysisText.substring(0, 1000)
+      };
+    }
+
+    res.json({
+      status: 'success',
+      analysis: analysis,
+      documentType: documentType,
+      textLength: text.length
+    });
+
+  } catch (error) {
+    console.error('Error analyzing text:', error);
+    res.status(500).json({
+      error: 'Failed to analyze document',
+      details: error.message
+    });
+  }
+});
 
 // =====================================================
 // STEP 1A: Check if PDF is password protected (Firebase URL)
@@ -618,10 +689,11 @@ app.get('/', (req, res) => {
       'POST /api/check-pdf-url',
       'POST /api/unlock-pdf',
       'POST /api/process-pdf',
+      'POST /api/analyze-text',  // NEW ENDPOINT
       'POST /api/generate-report'
     ],
-    version: '2.0',
-    features: ['Firebase URL support', 'Direct Excel download']
+    version: '3.0',
+    features: ['Client-side PDF processing support', 'Text analysis endpoint', 'Firebase URL support', 'Direct Excel download']
   });
 });
 
@@ -661,6 +733,7 @@ app.listen(PORT, () => {
 ║  Gemini AI: ${process.env.GEMINI_API_KEY ? '✅' : '❌ Missing API Key'}                        ║
 ║  Excel Export: ✅                      ║
 ║  Firebase URLs: ✅                     ║
+║  Text Analysis: ✅                     ║
 ╚════════════════════════════════════════╝
   `);
 });
