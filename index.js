@@ -11,6 +11,7 @@ import ExcelJS from 'exceljs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 
 // Load environment variables
 dotenv.config();
@@ -49,6 +50,80 @@ const upload = multer({
 const tempDir = path.join(__dirname, 'temp');
 fs.mkdir(tempDir, { recursive: true }).catch(console.error);
 
+// In-memory cache for storing analysis results (in production, use Redis or a database)
+const analysisCache = new Map();
+
+// =====================================================
+// DETERMINISTIC CATEGORIZATION FUNCTION
+// =====================================================
+function categorizeTransaction(description, amount, isCredit) {
+  const desc = description?.toLowerCase() || '';
+  
+  // For credits, only categorize specific types
+  if (isCredit) {
+    if (desc.includes('neft') || desc.includes('imps') || desc.includes('rtgs')) {
+      return 'neft';
+    }
+    if (desc.includes('upi')) {
+      return 'upi';
+    }
+    if (desc.includes('salary')) {
+      return 'salary';
+    }
+    return 'others';
+  }
+  
+  // For debits, use strict matching rules
+  // IMPORTANT: Order matters - check more specific patterns first
+  
+  // Credit card payments (including ONECARD)
+  if (desc.includes('onecard') || 
+      desc.includes('credit card') || 
+      desc.includes('cc payment') ||
+      desc.includes('creditcard')) {
+    return 'creditCard';
+  }
+  
+  // UPI transactions (exclude ONECARD even if it has UPI in description)
+  if (desc.includes('upi') && !desc.includes('onecard')) {
+    return 'upi';
+  }
+  
+  // Bank transfers
+  if (desc.includes('neft') || desc.includes('imps') || desc.includes('rtgs')) {
+    return 'neft';
+  }
+  
+  // ATM withdrawals
+  if (desc.includes('atm') || desc.includes('cash withdrawal')) {
+    return 'atm';
+  }
+  
+  // Default to others
+  return 'others';
+}
+
+// Function to detect currency from text
+function detectCurrency(text) {
+  const currencies = {
+    'INR': ['₹', 'INR', 'Rs.', 'Rs ', 'Rupees'],
+    'AED': ['AED', 'د.إ', 'Dirham'],
+    'USD': ['$', 'USD', 'Dollar'],
+    'EUR': ['€', 'EUR', 'Euro'],
+    'GBP': ['£', 'GBP', 'Pound']
+  };
+  
+  for (const [code, symbols] of Object.entries(currencies)) {
+    for (const symbol of symbols) {
+      if (text.includes(symbol)) {
+        return code;
+      }
+    }
+  }
+  
+  return 'INR'; // Default to INR
+}
+
 // =====================================================
 // NEW ENDPOINT: Analyze extracted text (no PDF processing needed)
 // =====================================================
@@ -64,15 +139,30 @@ app.post('/api/analyze-text', async (req, res) => {
       });
     }
 
+    // Create a hash of the text for caching
+    const textHash = crypto.createHash('md5').update(text).digest('hex');
+    const cacheKey = `${documentType}_${textHash}`;
+    
+    // Check if we have cached results
+    if (analysisCache.has(cacheKey)) {
+      console.log('Returning cached analysis for:', cacheKey);
+      const cachedResult = analysisCache.get(cacheKey);
+      return res.json(cachedResult);
+    }
+
     // Process with Gemini AI directly (no PDF extraction needed)
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
+    // Detect currency
+    const currency = detectCurrency(text);
+    console.log('Detected currency:', currency);
+    
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = documentType === 'bank' 
-      ? getBankStatementPrompt(text)
-      : getCreditCardPrompt(text);
+      ? getBankStatementPrompt(text, currency)
+      : getCreditCardPrompt(text, currency);
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
@@ -104,12 +194,61 @@ app.post('/api/analyze-text', async (req, res) => {
       };
     }
 
-    res.json({
+    // Apply deterministic categorization to transactions
+    if (analysis.transactions && Array.isArray(analysis.transactions)) {
+      analysis.transactions = analysis.transactions.map(txn => {
+        const isCredit = (txn.credit && txn.credit > 0);
+        const category = categorizeTransaction(txn.description, isCredit ? txn.credit : txn.debit, isCredit);
+        return {
+          ...txn,
+          category: category
+        };
+      });
+      
+      // Recalculate categories based on deterministic categorization
+      const categories = {};
+      let totalDebits = 0;
+      
+      analysis.transactions.forEach(txn => {
+        if (txn.debit && txn.debit > 0) {
+          totalDebits += txn.debit;
+          const cat = txn.category || 'others';
+          if (!categories[cat]) {
+            categories[cat] = { total: 0, count: 0, percentage: 0 };
+          }
+          categories[cat].total += txn.debit;
+          categories[cat].count += 1;
+        }
+      });
+      
+      // Calculate percentages
+      Object.keys(categories).forEach(cat => {
+        categories[cat].percentage = totalDebits > 0 
+          ? parseFloat(((categories[cat].total / totalDebits) * 100).toFixed(2))
+          : 0;
+      });
+      
+      analysis.categories = categories;
+    }
+
+    const responseData = {
       status: 'success',
       analysis: analysis,
       documentType: documentType,
-      textLength: text.length
-    });
+      textLength: text.length,
+      currency: currency
+    };
+
+    // Cache the result
+    analysisCache.set(cacheKey, responseData);
+    
+    // Clear old cache entries if cache gets too large (keep last 100 entries)
+    if (analysisCache.size > 100) {
+      const firstKey = analysisCache.keys().next().value;
+      analysisCache.delete(firstKey);
+    }
+
+    res.json(responseData);
 
   } catch (error) {
     console.error('Error analyzing text:', error);
@@ -328,13 +467,17 @@ app.post('/api/process-pdf', async (req, res) => {
     // Clean up temporary file
     await deleteTemporaryFile(sessionId);
 
+    // Detect currency
+    const currency = detectCurrency(extractedText);
+    console.log('Detected currency:', currency);
+
     // Process with Gemini AI
     console.log('Processing with Gemini AI...');
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = type === 'bank' 
-      ? getBankStatementPrompt(extractedText)
-      : getCreditCardPrompt(extractedText);
+      ? getBankStatementPrompt(extractedText, currency)
+      : getCreditCardPrompt(extractedText, currency);
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
@@ -363,7 +506,8 @@ app.post('/api/process-pdf', async (req, res) => {
       status: 'success',
       analysis: analysis,
       documentType: type,
-      textLength: extractedText.length
+      textLength: extractedText.length,
+      currency: currency
     });
 
   } catch (error) {
@@ -462,18 +606,20 @@ async function deleteTemporaryFile(sessionId) {
   }
 }
 
-function getBankStatementPrompt(text) {
+function getBankStatementPrompt(text, currency = 'INR') {
   return `
     You are a financial analyst. Analyze this bank statement and extract ALL information.
+    The currency is ${currency}.
     
     IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
+    EXTRACT TRANSACTIONS EXACTLY AS THEY APPEAR - DO NOT CATEGORIZE THEM.
     
     Extract and analyze:
-    1. All transactions with date, description, debit/credit amounts, and balance
-    2. Categorize each transaction (UPI, NEFT, ATM, Credit Card, etc.)
+    1. Extract ALL transactions EXACTLY as shown with date, description, debit/credit amounts, and balance
+    2. DO NOT categorize transactions - just extract them as-is
     3. Calculate total money in and out
     4. Find patterns in spending
-    5. Identify all recurring payments
+    5. Identify recurring payments
     
     Return this exact JSON structure:
     {
@@ -482,7 +628,8 @@ function getBankStatementPrompt(text) {
         "accountNumber": "string",
         "period": "string",
         "openingBalance": number,
-        "closingBalance": number
+        "closingBalance": number,
+        "currency": "${currency}"
       },
       "summary": {
         "totalDeposits": number,
@@ -490,13 +637,6 @@ function getBankStatementPrompt(text) {
         "netFlow": number,
         "transactionCount": number,
         "avgDailySpending": number
-      },
-      "categories": {
-        "upi": { "total": number, "count": number, "percentage": number },
-        "neft": { "total": number, "count": number, "percentage": number },
-        "atm": { "total": number, "count": number, "percentage": number },
-        "creditCard": { "total": number, "count": number, "percentage": number },
-        "others": { "total": number, "count": number, "percentage": number }
       },
       "monthlyPatterns": {
         "highestSpendingMonth": "string",
@@ -511,27 +651,30 @@ function getBankStatementPrompt(text) {
       ],
       "alerts": ["string"],
       "transactions": [
-        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number, "category": "string" }
+        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number }
       ]
     }
+    
+    IMPORTANT: In the transactions array, include EVERY transaction exactly as it appears.
+    DO NOT add a category field - we will categorize later.
     
     Bank Statement Text:
     ${text.substring(0, 50000)} // Limit text to avoid token limits
   `;
 }
 
-function getCreditCardPrompt(text) {
+function getCreditCardPrompt(text, currency = 'INR') {
   return `
     You are a financial analyst. Analyze this credit card statement and extract ALL information.
+    The currency is ${currency}.
     
     IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
     
     Extract and analyze:
     1. All transactions with date, merchant, and amount
     2. Identify ALL subscriptions (Netflix, Spotify, ChatGPT, etc.)
-    3. Categorize spending by type
-    4. Find expensive transactions
-    5. Calculate total spending
+    3. Find expensive transactions
+    4. Calculate total spending
     
     Return this exact JSON structure:
     {
@@ -540,7 +683,8 @@ function getCreditCardPrompt(text) {
         "cardNumber": "string",
         "statementPeriod": "string",
         "creditLimit": number,
-        "availableCredit": number
+        "availableCredit": number,
+        "currency": "${currency}"
       },
       "summary": {
         "totalSpent": number,
@@ -570,7 +714,7 @@ function getCreditCardPrompt(text) {
       ],
       "alerts": ["string"],
       "transactions": [
-        { "date": "string", "merchant": "string", "amount": number, "category": "string" }
+        { "date": "string", "merchant": "string", "amount": number }
       ]
     }
     
@@ -692,8 +836,15 @@ app.get('/', (req, res) => {
       'POST /api/analyze-text',  // NEW ENDPOINT
       'POST /api/generate-report'
     ],
-    version: '3.0',
-    features: ['Client-side PDF processing support', 'Text analysis endpoint', 'Firebase URL support', 'Direct Excel download']
+    version: '3.1',
+    features: [
+      'Deterministic categorization',
+      'Result caching for consistency', 
+      'Multi-currency support',
+      'Client-side PDF processing',
+      'Firebase URL support',
+      'Direct Excel download'
+    ]
   });
 });
 
@@ -734,6 +885,9 @@ app.listen(PORT, () => {
 ║  Excel Export: ✅                      ║
 ║  Firebase URLs: ✅                     ║
 ║  Text Analysis: ✅                     ║
+║  Deterministic Categories: ✅          ║
+║  Result Caching: ✅                    ║
+║  Multi-Currency: ✅                    ║
 ╚════════════════════════════════════════╝
   `);
 });
