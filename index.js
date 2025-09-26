@@ -68,7 +68,7 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = documentType === 'bank' 
       ? getBankStatementPrompt(text)
@@ -330,7 +330,7 @@ app.post('/api/process-pdf', async (req, res) => {
 
     // Process with Gemini AI
     console.log('Processing with Gemini AI...');
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = type === 'bank' 
       ? getBankStatementPrompt(extractedText)
