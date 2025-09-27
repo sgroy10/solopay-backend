@@ -6,7 +6,7 @@ import { PDFDocument } from 'pdf-lib';
 import pdf from 'pdf-parse-new';
 import fs from 'fs/promises';
 import path from 'path';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 import ExcelJS from 'exceljs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -72,12 +72,33 @@ app.post('/api/analyze-text', async (req, res) => {
     const modelName = "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${text.length}`);
     
+    // Safety settings to prevent blocking financial data
+    const safetySettings = [
+      {
+        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+    ];
+    
     const model = genAI.getGenerativeModel({ 
       model: modelName,
       generationConfig: {
         maxOutputTokens: 16384,  // Increased for large statements
         temperature: 0.1,       // Low temperature for accuracy
-      }
+      },
+      safetySettings,  // Add safety settings to prevent blocking
     });
 
     const prompt = documentType === 'bank' 
@@ -105,7 +126,10 @@ app.post('/api/analyze-text', async (req, res) => {
         }
       }
     } catch (parseError) {
-      console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
+      console.error('Failed to parse Gemini response. See details below.');
+      console.error('Raw Response Text:', analysisText); // Log the raw text
+      console.error('Parse Error:', parseError.message);
+      console.error('Response substring:', analysisText.substring(0, 500));
       // Return a basic structure if parsing fails
       analysis = {
         summary: {
@@ -351,12 +375,33 @@ app.post('/api/process-pdf', async (req, res) => {
     const modelName = "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
     
+    // Safety settings to prevent blocking financial data
+    const safetySettings = [
+      {
+        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+      {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+    ];
+    
     const model = genAI.getGenerativeModel({ 
       model: modelName,
       generationConfig: {
         maxOutputTokens: 16384,  // Increased for large statements
         temperature: 0.1,       // Low temperature for accuracy
-      }
+      },
+      safetySettings,  // Add safety settings to prevent blocking
     });
 
     const prompt = type === 'bank' 
@@ -384,7 +429,10 @@ app.post('/api/process-pdf', async (req, res) => {
         }
       }
     } catch (parseError) {
-      console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
+      console.error('Failed to parse Gemini response. See details below.');
+      console.error('Raw Response Text:', analysisText); // Log the raw text
+      console.error('Parse Error:', parseError.message);
+      console.error('Response substring:', analysisText.substring(0, 500));
       // Return a basic structure if parsing fails
       analysis = {
         summary: { error: 'Analysis completed but formatting failed' },
