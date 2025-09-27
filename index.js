@@ -69,7 +69,7 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Text length received:', text.length);
     
     // Choose model based on text size
-    const modelName = text.length > 150000 ? "gemini-1.5-pro" : "gemini-2.0-flash";
+    const modelName = text.length > 150000 ? "gemini-1.5-pro-latest" : "gemini-1.5-flash-latest";
     console.log(`Using model: ${modelName} for text length: ${text.length}`);
     
     const model = genAI.getGenerativeModel({ 
@@ -348,7 +348,7 @@ app.post('/api/process-pdf', async (req, res) => {
     console.log('Processing with Gemini AI...');
     
     // Choose model based on text size
-    const modelName = extractedText.length > 150000 ? "gemini-1.5-pro" : "gemini-2.0-flash";
+    const modelName = extractedText.length > 150000 ? "gemini-1.5-pro-latest" : "gemini-1.5-flash-latest";
     console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
     
     const model = genAI.getGenerativeModel({ 
@@ -587,29 +587,30 @@ function getBankStatementPrompt(text) {
 function getCreditCardPrompt(text) {
   // For very large texts, take strategic portions
   let textToAnalyze = text;
-  if (text.length > 100000) {
-    // Take first 40k, middle 20k, and last 40k characters
-    const first = text.substring(0, 40000);
-    const middleStart = Math.floor(text.length / 2) - 10000;
-    const middle = text.substring(middleStart, middleStart + 20000);
-    const last = text.substring(text.length - 40000);
-    textToAnalyze = first + '\n...[MIDDLE SECTION]...\n' + middle + '\n...[CONTINUED]...\n' + last;
+  if (text.length > 500000) {
+    const first = text.substring(0, 100000);
+    const last = text.substring(text.length - 100000);
+    textToAnalyze = first + '\n...[MIDDLE SECTION OMITTED FOR LENGTH]...\n' + last;
     console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
   }
 
   return `
     You are a financial analyst. Analyze this credit card statement and extract ALL information.
     
-    IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
+    CRITICAL RULES:
+    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks
+    2. All numbers must be numeric values without currency symbols (e.g., 550.75, not "$550.75")
+    3. All dates should be in DD/MM/YYYY format
+    4. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`
     
-    Extract and analyze:
-    1. All transactions with date, merchant, and amount
+    TASK BREAKDOWN:
+    1. Extract all transactions with date, merchant, and amount
     2. Identify ALL subscriptions (Netflix, Spotify, ChatGPT, etc.)
     3. Categorize spending by type
     4. Find expensive transactions
     5. Calculate total spending
     
-    Return this exact JSON structure:
+    Return this EXACT JSON structure:
     {
       "cardInfo": {
         "bankName": "string",
