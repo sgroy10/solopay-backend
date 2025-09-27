@@ -1,3 +1,4 @@
+
 // index.js - SoloPay Backend for PDF Statement Analyzer
 import express from 'express';
 import cors from 'cors';
@@ -499,18 +500,18 @@ function getBankStatementPrompt(text) {
   }
 
   return `
-    You are a financial analyst. Analyze this bank statement and extract ALL information.
-    
-    IMPORTANT: Return ONLY valid JSON with no additional text, markdown, or formatting.
+    Analyze this bank statement and extract ALL information.
     
     Extract the following from the bank statement:
     1. Account information (bank name, account number, period)
-    2. Opening and closing balances
-    3. Total deposits and withdrawals
+    2. Opening and closing balances - MUST be accurate numbers
+    3. Total deposits and withdrawals - MUST sum all transactions accurately
     4. Transaction categorization (UPI, NEFT, ATM, etc.)
     5. Top 5 highest transactions
     6. Monthly spending patterns if multi-month
-    7. All individual transactions
+    7. For large statements (>100 transactions), include summary only, not all transactions
+    
+    CRITICAL: All balance and transaction amounts must be accurate. Double-check calculations.
     
     Return this EXACT JSON structure:
     {
@@ -547,9 +548,7 @@ function getBankStatementPrompt(text) {
         { "date": "string", "description": "string", "amount": number, "type": "debit/credit" }
       ],
       "alerts": ["string"],
-      "transactions": [
-        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number }
-      ]
+      "transactions": []
     }
     
     Bank Statement Text:
@@ -568,16 +567,14 @@ function getCreditCardPrompt(text) {
   }
 
   return `
-    You are a financial analyst. Analyze this credit card statement and extract ALL information.
-    
-    IMPORTANT: Return ONLY valid JSON with no additional text, markdown, or formatting.
+    Analyze this credit card statement and extract ALL information.
     
     Extract:
     1. All transactions with date, merchant, and amount
     2. Identify ALL subscriptions (Netflix, Spotify, ChatGPT, etc.)
     3. Categorize spending by type
     4. Find expensive transactions
-    5. Calculate total spending
+    5. Calculate total spending - MUST be accurate
     
     Return this EXACT JSON structure:
     {
@@ -615,9 +612,7 @@ function getCreditCardPrompt(text) {
         { "date": "string", "merchant": "string", "amount": number }
       ],
       "alerts": ["string"],
-      "transactions": [
-        { "date": "string", "merchant": "string", "amount": number, "category": "string" }
-      ]
+      "transactions": []
     }
     
     Credit Card Statement Text:
@@ -738,8 +733,8 @@ app.get('/', (req, res) => {
       'POST /api/analyze-text',
       'POST /api/generate-report'
     ],
-    version: '2.0',
-    features: ['Client-side PDF processing support', 'Text analysis endpoint', 'Firebase URL support', 'Direct Excel download']
+    version: '3.0',
+    features: ['OpenAI GPT-4o-mini', 'Client-side PDF processing', 'Firebase URL support', 'Direct Excel download']
   });
 });
 
@@ -769,17 +764,17 @@ setInterval(async () => {
 // Start server
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════════════════════════════╗
+╔════════════════════════════════════════╗
 ║     🚀 SoloPay Backend Started!        ║
-╠════════════════════════════════════════════════════════════════╣
+╠════════════════════════════════════════╣
 ║  Port: ${PORT}                            ║
 ║  Status: Ready                         ║
 ║  PDF Support: ✅                       ║
 ║  Password PDFs: ✅                     ║
-║  Gemini AI: ${process.env.GEMINI_API_KEY ? '✅' : '❌ Missing API Key'}                        ║
+║  OpenAI GPT-4o: ${process.env.OPENAI_API_KEY ? '✅' : '❌ Missing API Key'}                    ║
 ║  Excel Export: ✅                      ║
 ║  Firebase URLs: ✅                     ║
 ║  Text Analysis: ✅                     ║
-╚════════════════════════════════════════════════════════════════════╝
+╚════════════════════════════════════════════════════════════════╝
   `);
 });
