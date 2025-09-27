@@ -6,7 +6,7 @@ import { PDFDocument } from 'pdf-lib';
 import pdf from 'pdf-parse-new';
 import fs from 'fs/promises';
 import path from 'path';
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
+import OpenAI from 'openai';
 import ExcelJS from 'exceljs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -22,8 +22,10 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Initialize services with extended timeout for large documents
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Initialize OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Middleware - Simple CORS allowing all origins
 app.use(cors());
@@ -64,97 +66,62 @@ app.post('/api/analyze-text', async (req, res) => {
       });
     }
 
-    // Process with Gemini AI directly (no PDF extraction needed)
-    console.log('Processing with Gemini AI...');
+    // Process with OpenAI directly (no PDF extraction needed)
+    console.log('Processing with OpenAI...');
     console.log('Text length received:', text.length);
     
-    // Use gemini-2.5-flash for all documents - it handles 1M tokens
-    const modelName = "gemini-2.5-flash";
-    console.log(`Using model: ${modelName} for text length: ${text.length}`);
-    
-    // Safety settings to prevent blocking financial data
-    const safetySettings = [
-      {
-        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-    ];
-    
-    const model = genAI.getGenerativeModel({ 
-      model: modelName,
-      generationConfig: {
-        maxOutputTokens: 16384,  // Increased for large statements
-        temperature: 0.1,       // Low temperature for accuracy
-      },
-      safetySettings,  // Add safety settings to prevent blocking
-    });
-
     const prompt = documentType === 'bank' 
       ? getBankStatementPrompt(text)
       : getCreditCardPrompt(text);
 
-    console.log('Prompt length being sent to Gemini:', prompt.length);
-    console.log('Sending request to Gemini AI...');
-    
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const analysisText = response.text();
-    
-    console.log('Response received from Gemini, length:', analysisText.length);
-
-    // Parse the JSON response from Gemini
-    let analysis;
     try {
-      // Try to extract JSON wrapped in ```json``` or '''json''' (handles both)
-      const jsonMatch = analysisText.match(/(?:```|''')json([\s\S]*?)(?:```|''')/);
-      if (jsonMatch && jsonMatch[1]) {
-        analysis = JSON.parse(jsonMatch[1].trim());
-      } else {
-        // Fallback to extracting first JSON object
-        const fallbackMatch = analysisText.match(/\{[\s\S]*\}/);
-        if (fallbackMatch) {
-          analysis = JSON.parse(fallbackMatch[0]);
-        } else {
-          throw new Error('No JSON found in response');
-        }
-      }
-    } catch (parseError) {
-      console.error('Failed to parse Gemini response. See details below.');
-      console.error('Raw Response Text:', analysisText); // Log the raw text
-      console.error('Parse Error:', parseError.message);
-      console.error('Response substring:', analysisText.substring(0, 500));
-      // Return a basic structure if parsing fails
-      analysis = {
-        summary: {
-          totalDeposits: 0,
-          totalWithdrawals: 0,
-          netFlow: 0,
-          error: 'Analysis completed but formatting failed'
-        },
-        categories: {},
-        alerts: ['Analysis completed but data formatting failed'],
-        rawResponse: analysisText.substring(0, 1000)
-      };
-    }
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Using the cost-effective model that handles large inputs well
+        messages: [
+          { 
+            role: "system", 
+            content: "You are an expert financial analyst. Your response must be only a single, valid JSON object and nothing else. Do not include any markdown, explanations, or additional text." 
+          },
+          { role: "user", content: prompt }
+        ],
+        response_format: { type: "json_object" }, // Forces valid JSON output
+        temperature: 0.1,
+        max_tokens: 8192
+      });
 
-    res.json({
-      status: 'success',
-      analysis: analysis,
-      documentType: documentType,
-      textLength: text.length
-    });
+      const analysisText = completion.choices[0].message.content;
+      console.log('OpenAI response received, length:', analysisText.length);
+      
+      // Parse the guaranteed JSON response
+      const analysis = JSON.parse(analysisText);
+      
+      res.json({
+        status: 'success',
+        analysis: analysis,
+        documentType: documentType,
+        textLength: text.length
+      });
+      
+    } catch (openaiError) {
+      console.error('OpenAI API error:', openaiError);
+      
+      // Fallback structure if OpenAI fails
+      res.json({
+        status: 'partial',
+        analysis: {
+          summary: {
+            totalDeposits: 0,
+            totalWithdrawals: 0,
+            netFlow: 0,
+            error: 'Analysis failed - ' + openaiError.message
+          },
+          categories: {},
+          alerts: ['Analysis could not be completed'],
+        },
+        documentType: documentType,
+        textLength: text.length
+      });
+    }
 
   } catch (error) {
     console.error('Error analyzing text:', error);
@@ -373,89 +340,57 @@ app.post('/api/process-pdf', async (req, res) => {
     // Clean up temporary file
     await deleteTemporaryFile(sessionId);
 
-    // Process with Gemini AI with increased token limit
-    console.log('Processing with Gemini AI...');
+    // Process with OpenAI
+    console.log('Processing with OpenAI...');
     
-    // Use gemini-2.5-flash for all documents - it handles 1M tokens
-    const modelName = "gemini-2.5-flash";
-    console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
-    
-    // Safety settings to prevent blocking financial data
-    const safetySettings = [
-      {
-        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-    ];
-    
-    const model = genAI.getGenerativeModel({ 
-      model: modelName,
-      generationConfig: {
-        maxOutputTokens: 16384,  // Increased for large statements
-        temperature: 0.1,       // Low temperature for accuracy
-      },
-      safetySettings,  // Add safety settings to prevent blocking
-    });
-
     const prompt = type === 'bank' 
       ? getBankStatementPrompt(extractedText)
       : getCreditCardPrompt(extractedText);
 
-    console.log('Prompt length being sent to Gemini:', prompt.length);
-    console.log('Sending request to Gemini AI...');
-    
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const analysisText = response.text();
-    
-    console.log('Response received from Gemini, length:', analysisText.length);
-
-    // Parse the JSON response from Gemini
-    let analysis;
     try {
-      // Try to extract JSON wrapped in ```json``` or '''json''' (handles both)
-      const jsonMatch = analysisText.match(/(?:```|''')json([\s\S]*?)(?:```|''')/);
-      if (jsonMatch && jsonMatch[1]) {
-        analysis = JSON.parse(jsonMatch[1].trim());
-      } else {
-        // Fallback to extracting first JSON object
-        const fallbackMatch = analysisText.match(/\{[\s\S]*\}/);
-        if (fallbackMatch) {
-          analysis = JSON.parse(fallbackMatch[0]);
-        } else {
-          throw new Error('No JSON found in response');
-        }
-      }
-    } catch (parseError) {
-      console.error('Failed to parse Gemini response. See details below.');
-      console.error('Raw Response Text:', analysisText); // Log the raw text
-      console.error('Parse Error:', parseError.message);
-      console.error('Response substring:', analysisText.substring(0, 500));
-      // Return a basic structure if parsing fails
-      analysis = {
-        summary: { error: 'Analysis completed but formatting failed' },
-        rawResponse: analysisText.substring(0, 1000)
-      };
-    }
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Using the cost-effective model that handles large inputs well
+        messages: [
+          { 
+            role: "system", 
+            content: "You are an expert financial analyst. Your response must be only a single, valid JSON object and nothing else. Do not include any markdown, explanations, or additional text." 
+          },
+          { role: "user", content: prompt }
+        ],
+        response_format: { type: "json_object" }, // Forces valid JSON output
+        temperature: 0.1,
+        max_tokens: 8192
+      });
 
-    res.json({
-      status: 'success',
-      analysis: analysis,
-      documentType: type,
-      textLength: extractedText.length
-    });
+      const analysisText = completion.choices[0].message.content;
+      console.log('OpenAI response received, length:', analysisText.length);
+      
+      // Parse the guaranteed JSON response
+      const analysis = JSON.parse(analysisText);
+      
+      res.json({
+        status: 'success',
+        analysis: analysis,
+        documentType: type,
+        textLength: extractedText.length
+      });
+      
+    } catch (openaiError) {
+      console.error('OpenAI API error:', openaiError);
+      
+      // Fallback structure if OpenAI fails
+      res.json({
+        status: 'partial',
+        analysis: {
+          summary: {
+            error: 'Analysis failed - ' + openaiError.message
+          },
+          rawResponse: 'OpenAI processing failed'
+        },
+        documentType: type,
+        textLength: extractedText.length
+      });
+    }
 
   } catch (error) {
     console.error('Error processing PDF:', error);
@@ -553,85 +488,67 @@ async function deleteTemporaryFile(sessionId) {
   }
 }
 
-// FIXED: getBankStatementPrompt - Using Gemini's exact solution
 function getBankStatementPrompt(text) {
-  // Detect statement size
-  const transactionCount = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []).length;
-  const isLargeStatement = transactionCount > 200 || text.length > 100000;
-  
-  // For very large texts, trim more aggressively
+  // For large texts, take strategic portions
   let textToAnalyze = text;
-  
-  // Trim if over 100K characters for yearly statements
   if (text.length > 100000) {
-    const first = text.substring(0, 40000);
-    const middle = text.substring(Math.floor(text.length/2) - 10000, Math.floor(text.length/2) + 10000);
-    const last = text.substring(text.length - 40000);
-    textToAnalyze = first + '\n...[SECTION OMITTED]...\n' + middle + '\n...[SECTION OMITTED]...\n' + last;
+    const first = text.substring(0, 30000);
+    const last = text.substring(text.length - 30000);
+    textToAnalyze = first + '\n...[MIDDLE SECTION OMITTED FOR LENGTH]...\n' + last;
     console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
-  } else {
-    console.log(`Processing full text: ${text.length} characters`);
   }
 
-  // SINGLE CONSISTENT PROMPT FOR ALL STATEMENT SIZES
   return `
-    You are an expert financial analyst. Analyze this bank statement with high precision.
+    You are a financial analyst. Analyze this bank statement and extract ALL information.
     
-    CRITICAL RULES:
-    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks.
-    2. All numbers must be numeric values without currency symbols (e.g., 1500.50, not "₹1,500.50").
-    3. All dates should be in DD/MM/YYYY format.
-    4. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`.
-
-    TASK BREAKDOWN:
-    Step 1: Extract account details (bank name, account number, period, opening/closing balance).
-    Step 2: Calculate all summary and category data (total deposits, withdrawals, UPI, NEFT, etc.).
-    Step 3: Identify monthly patterns, top transactions, and recurring payments.
-    Step 4: IMPORTANT: For the "transactions" array at the end of the JSON:
-       - If this is a large statement with many transactions, return an EMPTY array to save space: "transactions": []
-       - If this is a small or medium statement, include ALL transactions in the array.
+    IMPORTANT: Return ONLY valid JSON with no additional text, markdown, or formatting.
     
-    EXPECTED JSON OUTPUT (Structure is critical):
+    Extract the following from the bank statement:
+    1. Account information (bank name, account number, period)
+    2. Opening and closing balances
+    3. Total deposits and withdrawals
+    4. Transaction categorization (UPI, NEFT, ATM, etc.)
+    5. Top 5 highest transactions
+    6. Monthly spending patterns if multi-month
+    7. All individual transactions
+    
+    Return this EXACT JSON structure:
     {
       "accountInfo": {
-        "bankName": "extract bank name",
-        "accountNumber": "extract account number",
-        "period": "extract statement period",
-        "openingBalance": extract_opening_balance_as_number,
-        "closingBalance": extract_closing_balance_as_number
+        "bankName": "string",
+        "accountNumber": "string",
+        "period": "string",
+        "openingBalance": number,
+        "closingBalance": number
       },
       "summary": {
-        "totalDeposits": sum_all_credits,
-        "totalWithdrawals": sum_all_debits,
-        "netFlow": deposits_minus_withdrawals,
-        "transactionCount": total_number_of_transactions,
-        "avgDailySpending": average_daily_debit_amount
+        "totalDeposits": number,
+        "totalWithdrawals": number,
+        "netFlow": number,
+        "transactionCount": number,
+        "avgDailySpending": number
       },
       "categories": {
-        "upi": { "total": sum_upi_transactions, "count": count_upi_transactions, "percentage": percent_of_total },
-        "neft": { "total": sum_neft, "count": count_neft, "percentage": percent },
-        "atm": { "total": sum_atm, "count": count_atm, "percentage": percent },
-        "creditCard": { "total": sum_cc, "count": count_cc, "percentage": percent },
-        "achTransfers": { "total": sum_ach, "count": count_ach, "percentage": percent },
-        "others": { "total": sum_others, "count": count_others, "percentage": percent }
+        "upi": { "total": number, "count": number, "percentage": number },
+        "neft": { "total": number, "count": number, "percentage": number },
+        "atm": { "total": number, "count": number, "percentage": number },
+        "creditCard": { "total": number, "count": number, "percentage": number },
+        "others": { "total": number, "count": number, "percentage": number }
       },
       "monthlyPatterns": {
-        "highestSpendingMonth": "month_name_with_year",
-        "lowestSpendingMonth": "month_name_with_year",
-        "averageMonthlySpending": average_per_month
+        "highestSpendingMonth": "string",
+        "lowestSpendingMonth": "string",
+        "averageMonthlySpending": number
       },
       "recurringPayments": [
-        { "description": "merchant_name", "amount": recurring_amount, "frequency": "monthly/weekly" }
+        { "description": "string", "amount": number, "frequency": "string" }
       ],
       "topTransactions": [
-        { "date": "DD/MM/YYYY", "description": "transaction_description", "amount": amount, "type": "debit/credit" }
+        { "date": "string", "description": "string", "amount": number, "type": "debit/credit" }
       ],
-      "alerts": [
-        "High UPI transaction volume detected",
-        "Multiple ACH debits on same day"
-      ],
+      "alerts": ["string"],
       "transactions": [
-        { "date": "DD/MM/YYYY", "description": "full_description", "debit": debit_amount_or_0, "credit": credit_amount_or_0, "balance": balance_after }
+        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number }
       ]
     }
     
@@ -641,11 +558,11 @@ function getBankStatementPrompt(text) {
 }
 
 function getCreditCardPrompt(text) {
-  // For very large texts, take strategic portions
+  // For large texts, take strategic portions
   let textToAnalyze = text;
-  if (text.length > 500000) {
-    const first = text.substring(0, 100000);
-    const last = text.substring(text.length - 100000);
+  if (text.length > 100000) {
+    const first = text.substring(0, 30000);
+    const last = text.substring(text.length - 30000);
     textToAnalyze = first + '\n...[MIDDLE SECTION OMITTED FOR LENGTH]...\n' + last;
     console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
   }
@@ -653,14 +570,10 @@ function getCreditCardPrompt(text) {
   return `
     You are a financial analyst. Analyze this credit card statement and extract ALL information.
     
-    CRITICAL RULES:
-    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks
-    2. All numbers must be numeric values without currency symbols (e.g., 550.75, not "$550.75")
-    3. All dates should be in DD/MM/YYYY format
-    4. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`
+    IMPORTANT: Return ONLY valid JSON with no additional text, markdown, or formatting.
     
-    TASK BREAKDOWN:
-    1. Extract all transactions with date, merchant, and amount
+    Extract:
+    1. All transactions with date, merchant, and amount
     2. Identify ALL subscriptions (Netflix, Spotify, ChatGPT, etc.)
     3. Categorize spending by type
     4. Find expensive transactions
@@ -822,10 +735,10 @@ app.get('/', (req, res) => {
       'POST /api/check-pdf-url',
       'POST /api/unlock-pdf',
       'POST /api/process-pdf',
-      'POST /api/analyze-text',  // NEW ENDPOINT
+      'POST /api/analyze-text',
       'POST /api/generate-report'
     ],
-    version: '3.0',
+    version: '2.0',
     features: ['Client-side PDF processing support', 'Text analysis endpoint', 'Firebase URL support', 'Direct Excel download']
   });
 });
@@ -856,9 +769,9 @@ setInterval(async () => {
 // Start server
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
+╔════════════════════════════════════════════════════════════════╗
 ║     🚀 SoloPay Backend Started!        ║
-╠════════════════════════════════════════╣
+╠════════════════════════════════════════════════════════════════╣
 ║  Port: ${PORT}                            ║
 ║  Status: Ready                         ║
 ║  PDF Support: ✅                       ║
@@ -867,6 +780,6 @@ app.listen(PORT, () => {
 ║  Excel Export: ✅                      ║
 ║  Firebase URLs: ✅                     ║
 ║  Text Analysis: ✅                     ║
-╚════════════════════════════════════════╝
+╚════════════════════════════════════════════════════════════════════╝
   `);
 });
