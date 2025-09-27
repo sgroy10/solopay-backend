@@ -22,8 +22,15 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Initialize services
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Initialize services with extended timeout for large documents
+const genAI = new GoogleGenerativeAI(
+  process.env.GEMINI_API_KEY,
+  {
+    requestOptions: {
+      timeout: 300000  // 5 minutes timeout for large documents
+    }
+  }
+);
 
 // Middleware - Simple CORS allowing all origins
 app.use(cors());
@@ -105,13 +112,7 @@ app.post('/api/analyze-text', async (req, res) => {
       ? getBankStatementPrompt(text)
       : getCreditCardPrompt(text);
 
-    // Generate content with extended timeout for large documents
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      requestOptions: {
-        timeout: 300000, // Set timeout to 5 minutes (300,000 milliseconds)
-      }
-    });
+    const result = await model.generateContent(prompt);
     const response = await result.response;
     const analysisText = response.text();
 
@@ -414,13 +415,7 @@ app.post('/api/process-pdf', async (req, res) => {
       ? getBankStatementPrompt(extractedText)
       : getCreditCardPrompt(extractedText);
 
-    // Generate content with extended timeout for large documents
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      requestOptions: {
-        timeout: 300000, // Set timeout to 5 minutes (300,000 milliseconds)
-      }
-    });
+    const result = await model.generateContent(prompt);
     const response = await result.response;
     const analysisText = response.text();
 
