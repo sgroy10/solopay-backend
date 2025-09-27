@@ -68,8 +68,12 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
+    // Choose model based on text size
+    const modelName = text.length > 150000 ? "gemini-1.5-pro" : "gemini-2.0-flash";
+    console.log(`Using model: ${modelName} for text length: ${text.length}`);
+    
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-2.0-flash",  // Production-ready model
+      model: modelName,
       generationConfig: {
         maxOutputTokens: 8192,  // Maximum for structured financial data
         temperature: 0.1,       // Low temperature for accuracy
@@ -342,8 +346,13 @@ app.post('/api/process-pdf', async (req, res) => {
 
     // Process with Gemini AI with increased token limit
     console.log('Processing with Gemini AI...');
+    
+    // Choose model based on text size
+    const modelName = extractedText.length > 150000 ? "gemini-1.5-pro" : "gemini-2.0-flash";
+    console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
+    
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-2.0-flash",  // Production-ready model
+      model: modelName,
       generationConfig: {
         maxOutputTokens: 8192,  // Maximum for structured financial data
         temperature: 0.1,       // Low temperature for accuracy
@@ -491,15 +500,17 @@ function getBankStatementPrompt(text) {
   const transactionCount = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []).length;
   const isLargeStatement = transactionCount > 200 || text.length > 100000;
   
-  // For very large texts, take strategic portions
+  // For very large texts, don't trim - let Gemini handle it
   let textToAnalyze = text;
-  if (text.length > 150000) {
-    const first = text.substring(0, 50000);
-    const middleStart = Math.floor(text.length / 2) - 25000;
-    const middle = text.substring(middleStart, middleStart + 50000);
-    const last = text.substring(text.length - 50000);
-    textToAnalyze = first + '\n...[MIDDLE SECTION]...\n' + middle + '\n...[END SECTION]...\n' + last;
+  
+  // Only trim if absolutely necessary (over 500K characters)
+  if (text.length > 500000) {
+    const first = text.substring(0, 100000);
+    const last = text.substring(text.length - 100000);
+    textToAnalyze = first + '\n...[MIDDLE SECTION OMITTED FOR LENGTH]...\n' + last;
     console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
+  } else {
+    console.log(`Processing full text: ${text.length} characters`);
   }
 
   return `
