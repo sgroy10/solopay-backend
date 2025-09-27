@@ -68,7 +68,13 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.0-flash",  // Production-ready model
+      generationConfig: {
+        maxOutputTokens: 8192,  // Maximum for structured financial data
+        temperature: 0.1,       // Low temperature for accuracy
+      }
+    });
 
     const prompt = documentType === 'bank' 
       ? getBankStatementPrompt(text)
@@ -81,12 +87,18 @@ app.post('/api/analyze-text', async (req, res) => {
     // Parse the JSON response from Gemini
     let analysis;
     try {
-      // Extract JSON from the response (Gemini might add extra text)
-      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        analysis = JSON.parse(jsonMatch[0]);
+      // Try to extract JSON wrapped in ```json``` first (more reliable)
+      const jsonMatch = analysisText.match(/```json([\s\S]*?)```/);
+      if (jsonMatch && jsonMatch[1]) {
+        analysis = JSON.parse(jsonMatch[1].trim());
       } else {
-        throw new Error('No JSON found in response');
+        // Fallback to extracting first JSON object
+        const fallbackMatch = analysisText.match(/\{[\s\S]*\}/);
+        if (fallbackMatch) {
+          analysis = JSON.parse(fallbackMatch[0]);
+        } else {
+          throw new Error('No JSON found in response');
+        }
       }
     } catch (parseError) {
       console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
@@ -328,9 +340,15 @@ app.post('/api/process-pdf', async (req, res) => {
     // Clean up temporary file
     await deleteTemporaryFile(sessionId);
 
-    // Process with Gemini AI
+    // Process with Gemini AI with increased token limit
     console.log('Processing with Gemini AI...');
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.0-flash",  // Production-ready model
+      generationConfig: {
+        maxOutputTokens: 8192,  // Maximum for structured financial data
+        temperature: 0.1,       // Low temperature for accuracy
+      }
+    });
 
     const prompt = type === 'bank' 
       ? getBankStatementPrompt(extractedText)
@@ -343,12 +361,18 @@ app.post('/api/process-pdf', async (req, res) => {
     // Parse the JSON response from Gemini
     let analysis;
     try {
-      // Extract JSON from the response (Gemini might add extra text)
-      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        analysis = JSON.parse(jsonMatch[0]);
+      // Try to extract JSON wrapped in ```json``` first (more reliable)
+      const jsonMatch = analysisText.match(/```json([\s\S]*?)```/);
+      if (jsonMatch && jsonMatch[1]) {
+        analysis = JSON.parse(jsonMatch[1].trim());
       } else {
-        throw new Error('No JSON found in response');
+        // Fallback to extracting first JSON object
+        const fallbackMatch = analysisText.match(/\{[\s\S]*\}/);
+        if (fallbackMatch) {
+          analysis = JSON.parse(fallbackMatch[0]);
+        } else {
+          throw new Error('No JSON found in response');
+        }
       }
     } catch (parseError) {
       console.error('Failed to parse Gemini response:', analysisText.substring(0, 500));
@@ -463,64 +487,105 @@ async function deleteTemporaryFile(sessionId) {
 }
 
 function getBankStatementPrompt(text) {
+  // Detect statement size
+  const transactionCount = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []).length;
+  const isLargeStatement = transactionCount > 200 || text.length > 100000;
+  
+  // For very large texts, take strategic portions
+  let textToAnalyze = text;
+  if (text.length > 150000) {
+    const first = text.substring(0, 50000);
+    const middleStart = Math.floor(text.length / 2) - 25000;
+    const middle = text.substring(middleStart, middleStart + 50000);
+    const last = text.substring(text.length - 50000);
+    textToAnalyze = first + '\n...[MIDDLE SECTION]...\n' + middle + '\n...[END SECTION]...\n' + last;
+    console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
+  }
+
   return `
-    You are a financial analyst. Analyze this bank statement and extract ALL information.
+    You are an expert financial analyst. Analyze this bank statement with high precision.
     
-    IMPORTANT: Return ONLY valid JSON with no additional text or formatting.
+    CRITICAL RULES:
+    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks
+    2. All numbers must be numeric values without currency symbols (e.g., 1500.50, not "₹1,500.50")
+    3. All dates should be in DD/MM/YYYY format
+    4. For transactions array: ${isLargeStatement ? 'Include ONLY the 50 largest transactions' : 'Include ALL transactions'}
+    5. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`
     
-    Extract and analyze:
-    1. All transactions with date, description, debit/credit amounts, and balance
-    2. Categorize each transaction (UPI, NEFT, ATM, Credit Card, etc.)
-    3. Calculate total money in and out
-    4. Find patterns in spending
-    5. Identify all recurring payments
+    TASK BREAKDOWN:
+    Step 1: Extract account details (bank name, account number, period, opening/closing balance)
+    Step 2: Count and sum all transactions (total deposits, withdrawals, transaction count)
+    Step 3: Categorize transactions:
+       - UPI: Any transaction with "UPI" in description (except ONECARD)
+       - NEFT: Transactions with "NEFT"
+       - ATM: ATM withdrawals
+       - CreditCard: Credit card payments including ONECARD
+       - achTransfers: ACH debits/credits (ETMONEY, etc)
+       - Others: Everything else
+    Step 4: Identify patterns (recurring payments, highest spending month if multi-month)
     
-    Return this exact JSON structure:
+    EXPECTED JSON OUTPUT:
     {
       "accountInfo": {
-        "bankName": "string",
-        "accountNumber": "string",
-        "period": "string",
-        "openingBalance": number,
-        "closingBalance": number
+        "bankName": "extract bank name",
+        "accountNumber": "extract account number",
+        "period": "extract statement period",
+        "openingBalance": extract_opening_balance_as_number,
+        "closingBalance": extract_closing_balance_as_number
       },
       "summary": {
-        "totalDeposits": number,
-        "totalWithdrawals": number,
-        "netFlow": number,
-        "transactionCount": number,
-        "avgDailySpending": number
+        "totalDeposits": sum_all_credits,
+        "totalWithdrawals": sum_all_debits,
+        "netFlow": deposits_minus_withdrawals,
+        "transactionCount": total_number_of_transactions,
+        "avgDailySpending": average_daily_debit_amount
       },
       "categories": {
-        "upi": { "total": number, "count": number, "percentage": number },
-        "neft": { "total": number, "count": number, "percentage": number },
-        "atm": { "total": number, "count": number, "percentage": number },
-        "creditCard": { "total": number, "count": number, "percentage": number },
-        "others": { "total": number, "count": number, "percentage": number }
+        "upi": { "total": sum_upi_transactions, "count": count_upi_transactions, "percentage": percent_of_total },
+        "neft": { "total": sum_neft, "count": count_neft, "percentage": percent },
+        "atm": { "total": sum_atm, "count": count_atm, "percentage": percent },
+        "creditCard": { "total": sum_cc, "count": count_cc, "percentage": percent },
+        "achTransfers": { "total": sum_ach, "count": count_ach, "percentage": percent },
+        "others": { "total": sum_others, "count": count_others, "percentage": percent }
       },
       "monthlyPatterns": {
-        "highestSpendingMonth": "string",
-        "lowestSpendingMonth": "string",
-        "averageMonthlySpending": number
+        "highestSpendingMonth": "month_name_with_year",
+        "lowestSpendingMonth": "month_name_with_year",
+        "averageMonthlySpending": average_per_month
       },
       "recurringPayments": [
-        { "description": "string", "amount": number, "frequency": "string" }
+        { "description": "merchant_name", "amount": recurring_amount, "frequency": "monthly/weekly" }
       ],
       "topTransactions": [
-        { "date": "string", "description": "string", "amount": number, "type": "string" }
+        { "date": "DD/MM/YYYY", "description": "transaction_description", "amount": amount, "type": "debit/credit" }
       ],
-      "alerts": ["string"],
+      "alerts": [
+        "High UPI transaction volume detected",
+        "Multiple ACH debits on same day"
+      ],
       "transactions": [
-        { "date": "string", "description": "string", "debit": number, "credit": number, "balance": number, "category": "string" }
+        { "date": "DD/MM/YYYY", "description": "full_description", "debit": debit_amount_or_0, "credit": credit_amount_or_0, "balance": balance_after }
       ]
     }
     
     Bank Statement Text:
-    ${text.substring(0, 50000)} // Limit text to avoid token limits
+    ${textToAnalyze}
   `;
 }
 
 function getCreditCardPrompt(text) {
+  // For very large texts, take strategic portions
+  let textToAnalyze = text;
+  if (text.length > 100000) {
+    // Take first 40k, middle 20k, and last 40k characters
+    const first = text.substring(0, 40000);
+    const middleStart = Math.floor(text.length / 2) - 10000;
+    const middle = text.substring(middleStart, middleStart + 20000);
+    const last = text.substring(text.length - 40000);
+    textToAnalyze = first + '\n...[MIDDLE SECTION]...\n' + middle + '\n...[CONTINUED]...\n' + last;
+    console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
+  }
+
   return `
     You are a financial analyst. Analyze this credit card statement and extract ALL information.
     
@@ -575,7 +640,7 @@ function getCreditCardPrompt(text) {
     }
     
     Credit Card Statement Text:
-    ${text.substring(0, 50000)} // Limit text to avoid token limits
+    ${textToAnalyze}
   `;
 }
 
