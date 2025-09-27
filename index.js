@@ -68,14 +68,14 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
-    // Choose model based on text size - using 2.5 models that your API key has access to
-    const modelName = text.length > 150000 ? "gemini-2.5-pro" : "gemini-2.5-flash";
+    // Use gemini-2.5-flash for all documents - it handles 1M tokens
+    const modelName = "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${text.length}`);
     
     const model = genAI.getGenerativeModel({ 
       model: modelName,
       generationConfig: {
-        maxOutputTokens: 8192,  // Maximum for structured financial data
+        maxOutputTokens: 16384,  // Increased for large statements
         temperature: 0.1,       // Low temperature for accuracy
       }
     });
@@ -91,8 +91,8 @@ app.post('/api/analyze-text', async (req, res) => {
     // Parse the JSON response from Gemini
     let analysis;
     try {
-      // Try to extract JSON wrapped in ```json``` first (more reliable)
-      const jsonMatch = analysisText.match(/```json([\s\S]*?)```/);
+      // Try to extract JSON wrapped in ```json``` or '''json''' (handles both)
+      const jsonMatch = analysisText.match(/(?:```|''')json([\s\S]*?)(?:```|''')/);
       if (jsonMatch && jsonMatch[1]) {
         analysis = JSON.parse(jsonMatch[1].trim());
       } else {
@@ -347,14 +347,14 @@ app.post('/api/process-pdf', async (req, res) => {
     // Process with Gemini AI with increased token limit
     console.log('Processing with Gemini AI...');
     
-    // Choose model based on text size - using 2.5 models that your API key has access to
-    const modelName = extractedText.length > 150000 ? "gemini-2.5-pro" : "gemini-2.5-flash";
+    // Use gemini-2.5-flash for all documents - it handles 1M tokens
+    const modelName = "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
     
     const model = genAI.getGenerativeModel({ 
       model: modelName,
       generationConfig: {
-        maxOutputTokens: 8192,  // Maximum for structured financial data
+        maxOutputTokens: 16384,  // Increased for large statements
         temperature: 0.1,       // Low temperature for accuracy
       }
     });
@@ -370,8 +370,8 @@ app.post('/api/process-pdf', async (req, res) => {
     // Parse the JSON response from Gemini
     let analysis;
     try {
-      // Try to extract JSON wrapped in ```json``` first (more reliable)
-      const jsonMatch = analysisText.match(/```json([\s\S]*?)```/);
+      // Try to extract JSON wrapped in ```json``` or '''json''' (handles both)
+      const jsonMatch = analysisText.match(/(?:```|''')json([\s\S]*?)(?:```|''')/);
       if (jsonMatch && jsonMatch[1]) {
         analysis = JSON.parse(jsonMatch[1].trim());
       } else {
@@ -495,6 +495,7 @@ async function deleteTemporaryFile(sessionId) {
   }
 }
 
+// FIXED: getBankStatementPrompt - Using Gemini's exact solution
 function getBankStatementPrompt(text) {
   // Detect statement size
   const transactionCount = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []).length;
@@ -513,29 +514,25 @@ function getBankStatementPrompt(text) {
     console.log(`Processing full text: ${text.length} characters`);
   }
 
+  // SINGLE CONSISTENT PROMPT FOR ALL STATEMENT SIZES
   return `
     You are an expert financial analyst. Analyze this bank statement with high precision.
     
     CRITICAL RULES:
-    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks
-    2. All numbers must be numeric values without currency symbols (e.g., 1500.50, not "₹1,500.50")
-    3. All dates should be in DD/MM/YYYY format
-    4. For transactions array: ${isLargeStatement ? 'Include ONLY the 50 largest transactions' : 'Include ALL transactions'}
-    5. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`
-    
+    1. Return ONLY valid JSON - no markdown, no extra text, no code blocks.
+    2. All numbers must be numeric values without currency symbols (e.g., 1500.50, not "₹1,500.50").
+    3. All dates should be in DD/MM/YYYY format.
+    4. If returning JSON in code blocks, wrap it in \`\`\`json and \`\`\`.
+
     TASK BREAKDOWN:
-    Step 1: Extract account details (bank name, account number, period, opening/closing balance)
-    Step 2: Count and sum all transactions (total deposits, withdrawals, transaction count)
-    Step 3: Categorize transactions:
-       - UPI: Any transaction with "UPI" in description (except ONECARD)
-       - NEFT: Transactions with "NEFT"
-       - ATM: ATM withdrawals
-       - CreditCard: Credit card payments including ONECARD
-       - achTransfers: ACH debits/credits (ETMONEY, etc)
-       - Others: Everything else
-    Step 4: Identify patterns (recurring payments, highest spending month if multi-month)
+    Step 1: Extract account details (bank name, account number, period, opening/closing balance).
+    Step 2: Calculate all summary and category data (total deposits, withdrawals, UPI, NEFT, etc.).
+    Step 3: Identify monthly patterns, top transactions, and recurring payments.
+    Step 4: IMPORTANT: For the "transactions" array at the end of the JSON:
+       - If this is a large statement with many transactions, return an EMPTY array to save space: "transactions": []
+       - If this is a small or medium statement, include ALL transactions in the array.
     
-    EXPECTED JSON OUTPUT:
+    EXPECTED JSON OUTPUT (Structure is critical):
     {
       "accountInfo": {
         "bankName": "extract bank name",
