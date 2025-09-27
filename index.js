@@ -105,7 +105,13 @@ app.post('/api/analyze-text', async (req, res) => {
       ? getBankStatementPrompt(text)
       : getCreditCardPrompt(text);
 
-    const result = await model.generateContent(prompt);
+    // Generate content with extended timeout for large documents
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      requestOptions: {
+        timeout: 300000, // Set timeout to 5 minutes (300,000 milliseconds)
+      }
+    });
     const response = await result.response;
     const analysisText = response.text();
 
@@ -408,7 +414,13 @@ app.post('/api/process-pdf', async (req, res) => {
       ? getBankStatementPrompt(extractedText)
       : getCreditCardPrompt(extractedText);
 
-    const result = await model.generateContent(prompt);
+    // Generate content with extended timeout for large documents
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      requestOptions: {
+        timeout: 300000, // Set timeout to 5 minutes (300,000 milliseconds)
+      }
+    });
     const response = await result.response;
     const analysisText = response.text();
 
