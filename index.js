@@ -7,6 +7,7 @@ import pdf from 'pdf-parse-new';
 import fs from 'fs/promises';
 import path from 'path';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { DocumentProcessorServiceClient } from '@google-cloud/documentai';
 import ExcelJS from 'exceljs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -24,6 +25,12 @@ const PORT = process.env.PORT || 3001;
 
 // Initialize services
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Initialize Document AI
+const documentAI = new DocumentProcessorServiceClient({
+  keyFilename: './google-credentials.json'
+});
+const processorName = process.env.PROCESSOR_ID || 'projects/833177799389/locations/us/processors/e95cb2739ca3b6f3';
 
 // Middleware - Simple CORS allowing all origins
 app.use(cors());
@@ -324,11 +331,28 @@ app.post('/api/process-pdf', async (req, res) => {
       });
     }
 
-    // Extract text from PDF
-    console.log('Extracting text from PDF...');
-    const pdfData = await pdf(pdfBuffer);
-    const extractedText = pdfData.text;
-    console.log('Text extracted, length:', extractedText.length);
+    // Use Document AI to extract text with proper structure
+    console.log('Processing with Google Document AI...');
+    
+    const request = {
+      name: processorName,
+      rawDocument: {
+        content: pdfBuffer.toString('base64'),
+        mimeType: 'application/pdf',
+      },
+    };
+
+    const [result] = await documentAI.processDocument(request);
+    const { document } = result;
+    
+    // Extract text from Document AI response
+    const extractedText = document.text;
+    console.log('Document AI extracted text length:', extractedText.length);
+    
+    // Log table data if found
+    if (document.pages && document.pages[0].tables) {
+      console.log('Tables found:', document.pages[0].tables.length);
+    }
 
     // Clean up temporary file
     await deleteTemporaryFile(sessionId);
@@ -341,8 +365,8 @@ app.post('/api/process-pdf', async (req, res) => {
       ? getBankStatementPrompt(extractedText)
       : getCreditCardPrompt(extractedText);
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
+    const result2 = await model.generateContent(prompt);
+    const response = await result2.response;
     const analysisText = response.text();
 
     // Parse the JSON response from Gemini
