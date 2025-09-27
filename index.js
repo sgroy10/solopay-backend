@@ -23,14 +23,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Initialize services with extended timeout for large documents
-const genAI = new GoogleGenerativeAI(
-  process.env.GEMINI_API_KEY,
-  {
-    requestOptions: {
-      timeout: 300000  // 5 minutes timeout for large documents
-    }
-  }
-);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Middleware - Simple CORS allowing all origins
 app.use(cors());
@@ -112,9 +105,14 @@ app.post('/api/analyze-text', async (req, res) => {
       ? getBankStatementPrompt(text)
       : getCreditCardPrompt(text);
 
+    console.log('Prompt length being sent to Gemini:', prompt.length);
+    console.log('Sending request to Gemini AI...');
+    
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const analysisText = response.text();
+    
+    console.log('Response received from Gemini, length:', analysisText.length);
 
     // Parse the JSON response from Gemini
     let analysis;
@@ -415,9 +413,14 @@ app.post('/api/process-pdf', async (req, res) => {
       ? getBankStatementPrompt(extractedText)
       : getCreditCardPrompt(extractedText);
 
+    console.log('Prompt length being sent to Gemini:', prompt.length);
+    console.log('Sending request to Gemini AI...');
+    
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const analysisText = response.text();
+    
+    console.log('Response received from Gemini, length:', analysisText.length);
 
     // Parse the JSON response from Gemini
     let analysis;
@@ -556,14 +559,15 @@ function getBankStatementPrompt(text) {
   const transactionCount = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []).length;
   const isLargeStatement = transactionCount > 200 || text.length > 100000;
   
-  // For very large texts, don't trim - let Gemini handle it
+  // For very large texts, trim more aggressively
   let textToAnalyze = text;
   
-  // Only trim if absolutely necessary (over 500K characters)
-  if (text.length > 500000) {
-    const first = text.substring(0, 100000);
-    const last = text.substring(text.length - 100000);
-    textToAnalyze = first + '\n...[MIDDLE SECTION OMITTED FOR LENGTH]...\n' + last;
+  // Trim if over 100K characters for yearly statements
+  if (text.length > 100000) {
+    const first = text.substring(0, 40000);
+    const middle = text.substring(Math.floor(text.length/2) - 10000, Math.floor(text.length/2) + 10000);
+    const last = text.substring(text.length - 40000);
+    textToAnalyze = first + '\n...[SECTION OMITTED]...\n' + middle + '\n...[SECTION OMITTED]...\n' + last;
     console.log(`Text trimmed from ${text.length} to ${textToAnalyze.length} characters`);
   } else {
     console.log(`Processing full text: ${text.length} characters`);
