@@ -68,8 +68,8 @@ app.post('/api/analyze-text', async (req, res) => {
     console.log('Processing with Gemini AI...');
     console.log('Text length received:', text.length);
     
-    // Choose model based on text size
-    const modelName = text.length > 150000 ? "gemini-1.5-pro" : "gemini-1.5-flash";
+    // Choose model based on text size - using 2.5 models that your API key has access to
+    const modelName = text.length > 150000 ? "gemini-2.5-pro" : "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${text.length}`);
     
     const model = genAI.getGenerativeModel({ 
@@ -347,8 +347,8 @@ app.post('/api/process-pdf', async (req, res) => {
     // Process with Gemini AI with increased token limit
     console.log('Processing with Gemini AI...');
     
-    // Choose model based on text size
-    const modelName = extractedText.length > 150000 ? "gemini-1.5-pro" : "gemini-1.5-flash";
+    // Choose model based on text size - using 2.5 models that your API key has access to
+    const modelName = extractedText.length > 150000 ? "gemini-2.5-pro" : "gemini-2.5-flash";
     console.log(`Using model: ${modelName} for text length: ${extractedText.length}`);
     
     const model = genAI.getGenerativeModel({ 
